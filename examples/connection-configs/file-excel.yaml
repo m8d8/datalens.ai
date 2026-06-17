@@ -1,0 +1,30 @@
+# Local Excel File (.xlsx, .xls)
+# Use for: Excel spreadsheets with multiple sheets
+
+name: local_excel_data
+source_type: file
+description: "Local Excel File"
+
+params:
+  # File path (supports .xlsx and .xls)
+  path: "${DATA_DIR}/quarterly_report.xlsx"
+
+  # Sheet names to analyze (comma-separated)
+  # If omitted, all sheets are analyzed
+  sheets: "Sales,Inventory,Employees"
+
+profiling:
+  sample_size: 10000
+  max_depth: 5
+
+metadata:
+  created: "2026-06-11"
+  tags: ["file", "excel", "local"]
+
+# Usage:
+# export DATA_DIR="/data/exports"
+# datalens analyze --cc local_excel_data
+
+# Sheet selection:
+# sheets: "Sheet1,Sheet2,Sheet3"     # Specific sheets
+# # (omit to analyze all sheets)

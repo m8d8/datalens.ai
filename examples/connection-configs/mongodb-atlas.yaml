@@ -1,0 +1,43 @@
+# MongoDB Atlas Cloud Database
+# Use for: MongoDB Atlas clusters (hosted)
+
+name: mongo_atlas_prod
+source_type: mongodb
+description: "MongoDB Atlas Production Cluster"
+
+params:
+  # Database name
+  db: "analytics"
+
+  # MongoDB connection string (Atlas format)
+  # Format: mongodb+srv://username:password@cluster.mongodb.net
+  uri: "${MONGO_ATLAS_URI}"
+
+  # Collections to analyze (comma-separated)
+  collections: "users,orders,products,transactions"
+
+  # Optional: Query-based sampling (advanced)
+  # This allows analyzing specific subsets of data
+  # objects:
+  #   - "users|{\"status\": \"active\"} -> ActiveUsers"
+  #   - "orders|{\"status\": \"completed\"} -> CompletedOrders"
+  #   - "products|{\"inventory\": {\"$gt\": 0}} -> InStock"
+
+profiling:
+  sample_size: 10000
+  max_depth: 10
+  max_distinct_values: 500
+
+metadata:
+  created: "2026-06-11"
+  tags: ["mongodb", "atlas", "production"]
+
+# Usage:
+# export MONGO_ATLAS_URI="mongodb+srv://admin:SecurePassword123@prod-cluster.mongodb.net"
+# datalens analyze --cc mongo_atlas_prod
+
+# To get your MongoDB Atlas URI:
+# 1. MongoDB Atlas Console → Cluster → Connect
+# 2. Copy "Driver" connection string
+# 3. Replace <password> and <dbname> with actual values
+# 4. Store in environment variable as MONGO_ATLAS_URI

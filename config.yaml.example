@@ -1,0 +1,33 @@
+# Datalens Configuration
+# Copy to config.yaml and customize
+
+# Sampling
+sample_size: 1000          # Records to sample per object
+max_depth: 10              # Maximum nesting depth
+max_array_depth: 3         # Maximum nested array depth
+max_array_items: 100       # Array elements to process (0 = unlimited)
+max_distinct_values: 500   # Distinct values to track per field
+max_examples: 5            # Example values per field
+sample_records_count: 3    # Full sample records in output
+
+# Analysis
+low_cardinality_threshold: 50  # Fields with <= N distinct values
+
+# Output
+out_dir: "output"          # Output directory
+
+# Privacy
+mask_pii: true             # Mask detected PII in reports
+
+# AI (optional) — see secrets.yaml.example for credentials
+# off       = disabled (default)
+# auto      = auto-detect: license providers first, then API keys
+# anthropic = Claude API (API key)
+# openai    = OpenAI API (API key)
+# cursor    = Cursor subscription via cursor-agent login, or CURSOR_API_KEY
+# copilot   = GitHub Copilot via `gh auth login` + `gh copilot`
+# claude    = Claude Code / Desktop CLI (`claude` on PATH)
+ai_provider: "off"
+
+# Debug
+debug: false

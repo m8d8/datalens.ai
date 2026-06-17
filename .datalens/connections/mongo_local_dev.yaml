@@ -1,0 +1,38 @@
+# MongoDB Local/Self-Hosted Database
+# Use for: Local MongoDB instances, self-managed servers
+
+name: mongo_local_dev
+source_type: mongodb
+description: "MongoDB Development (Local/Self-Hosted)"
+
+params:
+  # Database name
+  db: "test_db"
+
+  # MongoDB connection string
+  # Local: mongodb://localhost:27017
+  # Remote with auth: mongodb://user:password@host:27017
+  uri: "mongodb://localhost:27017"
+
+  # Collections to analyze
+  collections: "collection1,collection2,collection3"
+
+profiling:
+  sample_size: 100000
+  max_depth: 8
+
+metadata:
+  created: "2026-06-07"
+  tags: ["mongodb", "local", "development"]
+
+# Usage:
+## datalens analyze --cc mongo_local_dev
+# with uv:
+## uv run datalens analyze --cc mongo_local_dev
+
+# For authenticated local MongoDB:
+# 1. Create URI with credentials:
+#    uri: "mongodb://admin:password@localhost:27017"
+# 2. Or use environment variable:
+#    uri: "${MONGO_LOCAL_URI}"
+#    export MONGO_LOCAL_URI="mongodb://admin:password@localhost:27017"

@@ -1,0 +1,33 @@
+# Local CSV File
+# Use for: Local CSV files
+
+name: local_csv_data
+source_type: file
+description: "Local CSV File"
+
+params:
+  # File path (absolute or relative to project root)
+  # Use ${VAR} for environment variable expansion
+  path: "${DATA_DIR}/customers.csv"
+
+profiling:
+  sample_size: 10000
+  max_depth: 5
+
+metadata:
+  created: "2026-06-11"
+  tags: ["file", "csv", "local"]
+
+# Usage:
+# export DATA_DIR="/data/exports"
+# datalens analyze --cc local_csv_data
+
+# Alternatives:
+# 1. Absolute path
+#    path: "/data/exports/customers.csv"
+#
+# 2. Relative to project
+#    path: "data/customers.csv"
+#
+# 3. Home directory
+#    path: "~/Downloads/customers.csv"

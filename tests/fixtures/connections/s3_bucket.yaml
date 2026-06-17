@@ -1,0 +1,18 @@
+# S3 connection config
+name: s3_bucket
+source_type: s3
+description: "S3 data lake bucket"
+
+params:
+  uri: "s3://data-lake-bucket/raw/"
+  region: "us-east-1"
+  access_key_id: "${AWS_ACCESS_KEY_ID}"
+  secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+
+profiling:
+  sample_size: 5000
+  max_depth: 8
+
+metadata:
+  created: "2026-06-11"
+  tags: ["test", "s3"]

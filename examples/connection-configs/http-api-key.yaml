@@ -1,0 +1,41 @@
+# HTTP API with API Key Authentication
+# Use for: REST APIs with API key headers, custom key headers
+
+name: api_key_example
+source_type: http
+description: "HTTP API with API Key (custom header)"
+
+params:
+  # Base URL for the API
+  uri: "https://api.example.com/v1"
+
+  # API Key authentication
+  auth_type: api_key
+  api_key: "${API_KEY}"           # Load from environment variable
+  api_key_header: "X-API-Key"     # Header name (customize if needed)
+
+  # Optional: HTTP configuration
+  timeout: 30
+  max_retries: 3
+
+  # Optional: Custom headers (in addition to API key header)
+  custom_headers:
+    Accept: "application/json"
+    X-Client-Version: "1.0"
+
+profiling:
+  sample_size: 10000
+  max_depth: 10
+
+metadata:
+  created: "2026-06-11"
+  tags: ["api", "api-key"]
+
+# Usage:
+# export API_KEY="sk-abc123def456ghi789"
+# datalens analyze --cc api_key_example
+
+# Note: Some APIs use different header names:
+# api_key_header: "Authorization"   # Some use this with "Bearer sk-..."
+# api_key_header: "X-RapidAPI-Key"  # RapidAPI uses this
+# api_key_header: "Subscription-Key" # Azure uses this

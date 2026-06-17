@@ -1,0 +1,35 @@
+# Local JSON File
+# Use for: JSON files with root element specification
+
+name: local_json_data
+source_type: file
+description: "Local JSON File with Nested Data"
+
+params:
+  # File path
+  path: "${DATA_DIR}/catalogue.json"
+
+  # Root element path (for nested JSON)
+  # If your JSON is: { "data": { "items": [...] } }
+  # Use: root: "data.items"
+  root: "products"
+
+profiling:
+  sample_size: 10000
+  max_depth: 10
+
+metadata:
+  created: "2026-06-11"
+  tags: ["file", "json", "local"]
+
+# Usage:
+# export DATA_DIR="/data/exports"
+# datalens analyze --cc local_json_data
+
+# Root path examples:
+# Your JSON structure          | root value
+# ─────────────────────────────────────────────────
+# {"items": [...]}             | "items"
+# {"data": {"users": [...]}}   | "data.users"
+# [...]                        | (omit root for array)
+# {"nested": {"deep": {...}}}  | "nested.deep"

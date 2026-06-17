@@ -1,0 +1,41 @@
+# HTTP API with Bearer Token Authentication
+# Use for: OAuth2, JWT tokens, custom API tokens
+
+name: api_bearer_example
+source_type: http
+description: "HTTP API with Bearer Token (JWT, OAuth2)"
+
+params:
+  # Base URL for the API
+  uri: "https://api.example.com/v1"
+
+  # Bearer token authentication (JWT, OAuth2)
+  auth_type: bearer
+  auth_token: "${API_TOKEN}"  # Load from environment variable
+
+  # Optional: HTTP configuration
+  timeout: 30                 # Request timeout in seconds
+  max_retries: 3             # Retry failed requests
+
+  # Optional: Custom headers
+  custom_headers:
+    Accept: "application/json"
+    X-API-Version: "v1"
+    X-Client-ID: "datalens"
+
+# Optional: Override sampling defaults
+profiling:
+  sample_size: 10000
+  max_depth: 10
+  max_distinct_values: 500
+
+# Optional: Metadata for tracking
+metadata:
+  created: "2026-06-11"
+  updated: "2026-06-11"
+  tags: ["api", "production", "analytics"]
+  contact: "data-team@example.com"
+
+# Usage:
+# export API_TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+# datalens analyze --cc api_bearer_example

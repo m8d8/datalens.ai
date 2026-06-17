@@ -1,0 +1,13 @@
+# MongoDB connection config
+name: mongodb_local
+source_type: mongodb
+description: "Local MongoDB instance for testing"
+
+params:
+  db: testdb
+  uri: "mongodb://localhost:27017"
+  collections: "users,orders"
+
+metadata:
+  created: "2026-06-11"
+  tags: ["test", "local"]

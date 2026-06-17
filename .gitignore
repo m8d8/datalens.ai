@@ -1,0 +1,47 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Environment, secrets, and local config
+.env
+.env.local
+secrets.yaml
+secrets.yml
+.datalens/secrets.yaml
+.datalens/secrets.yml
+.datalens/.env
+.datalens/connections/        # Local connection configs (keep private)
+
+# Output and history (generated artifacts at runtime)
+/output/
+/history/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Porting reference (untracked)
+_legacy/
+
+# uv
+uv.lock
+
+# tmp
+tmp/
+tmp/**

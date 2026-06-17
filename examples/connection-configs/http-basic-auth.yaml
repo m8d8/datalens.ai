@@ -1,0 +1,35 @@
+# HTTP API with Basic Authentication
+# Use for: Legacy APIs, Basic HTTP Auth
+
+name: api_basic_auth_example
+source_type: http
+description: "HTTP API with Basic Authentication (username/password)"
+
+params:
+  # Base URL for the API
+  uri: "https://api.example.com/v1"
+
+  # Basic authentication (HTTP Basic Auth)
+  auth_type: basic
+  username: "api_user"
+  password: "${API_PASSWORD}"  # Load password from environment variable
+
+  # Optional: HTTP configuration
+  timeout: 30
+  max_retries: 3
+
+  # Optional: Custom headers
+  custom_headers:
+    Accept: "application/json"
+
+profiling:
+  sample_size: 10000
+  max_depth: 10
+
+metadata:
+  created: "2026-06-11"
+  tags: ["api", "basic-auth"]
+
+# Usage:
+# export API_PASSWORD="your_secret_password"
+# datalens analyze --cc api_basic_auth_example

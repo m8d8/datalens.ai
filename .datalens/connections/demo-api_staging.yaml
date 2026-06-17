@@ -1,0 +1,14 @@
+name: my_api
+source_type: http
+description: "JSONPlaceholder test API for demo"
+params:
+  uri: "https://jsonplaceholder.typicode.com/users"
+
+metadata:
+  created: "2026-06-11"
+  updated: "2026-06-11"
+  owner: "data-team"
+  tags:
+    - test
+    - demo
+    - public-api

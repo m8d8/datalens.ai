@@ -1,0 +1,15 @@
+# File connection config
+name: csv_file
+source_type: file
+description: "Test CSV file"
+
+params:
+  path: "${DATA_DIR}/test_data.csv"
+
+profiling:
+  sample_size: 1000
+  max_depth: 5
+
+metadata:
+  created: "2026-06-11"
+  tags: ["test", "file"]

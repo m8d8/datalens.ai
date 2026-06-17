@@ -1,0 +1,18 @@
+# HTTP API connection config
+name: http_api
+source_type: http
+description: "Test HTTP API endpoint with bearer auth"
+
+params:
+  uri: "https://api.example.com/data"
+  auth_type: bearer
+  auth_token: "${TEST_API_TOKEN}"
+  timeout: 30
+  max_retries: 3
+  custom_headers:
+    Accept: "application/json"
+    X-Client-Version: "1.0"
+
+metadata:
+  created: "2026-06-11"
+  tags: ["test", "api"]

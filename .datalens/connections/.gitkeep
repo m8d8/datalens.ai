@@ -1,0 +1,14 @@
+# This directory contains local connection configs
+# All files here are git-ignored (see ../.gitignore)
+#
+# To create a connection:
+# 1. Copy an example from ../../examples/connection-configs/
+# 2. Edit for your environment (API endpoints, database names, etc.)
+# 3. Reference credentials via ${VAR_NAME} (secrets go in ../secrets.yaml)
+#
+# Example:
+#   cp ../../examples/connection-configs/http-bearer-token.yaml ./my_api.yaml
+#   Edit my_api.yaml with your actual endpoint
+#   Then use: datalens analyze --cc my_api
+#
+# See: ../README.md

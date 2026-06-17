@@ -1,0 +1,34 @@
+# Local XML File
+# Use for: XML files with root element specification
+
+name: local_xml_data
+source_type: file
+description: "Local XML File with Records"
+
+params:
+  # File path
+  path: "${DATA_DIR}/feed.xml"
+
+  # Root element path (the repeating record element)
+  # For: <root><item>...</item><item>...</item></root>
+  # Use: root: "item"
+  root: "record"
+
+profiling:
+  sample_size: 10000
+  max_depth: 10
+
+metadata:
+  created: "2026-06-11"
+  tags: ["file", "xml", "local"]
+
+# Usage:
+# export DATA_DIR="/data/exports"
+# datalens analyze --cc local_xml_data
+
+# XML structure examples:
+# Your XML structure                    | root value
+# ─────────────────────────────────────────────────
+# <root><item>...</item>...</root>      | "item"
+# <data><record>...</record>...</data>  | "record"
+# <feed><entry>...</entry>...</feed>    | "entry"
