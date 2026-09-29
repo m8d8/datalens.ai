@@ -85,6 +85,12 @@ class AnalysisResult:
     diff: dict[str, Any] | None = None
     """Schema drift vs. a previous run (summary form), if a previous run was supplied."""
 
+    schema_drift_json: dict[str, Any] | None = None
+    """Machine-readable schema-drift artifact (objects/fields/types) for CI/CD, if drift was computed."""
+
+    coverage_drift_json: dict[str, Any] | None = None
+    """Machine-readable coverage-drift artifact (per-field %-change + threshold breaches), if drift was computed."""
+
     # Optional
     ai_insights: dict[str, Any] | None = None
     """AI-generated insights (only if AI provider configured)."""
@@ -154,7 +160,13 @@ def analyze(
         total_sampled = sum(obj.get("sampled", 0) for obj in schema_json.get("objects", []))
 
         # Schema drift vs. a previous run (if supplied)
-        schema_diff = detect_drift(schema_json, previous_schema)
+        schema_diff = detect_drift(
+            schema_json,
+            previous_schema,
+            coverage_thresholds=config.coverage_thresholds,
+            report_reduction_exceeds=config.report_coverage_reduction_exceeds,
+            report_increase_exceeds=config.report_coverage_increase_exceeds,
+        )
         diff_summary = (
             {"summary": schema_diff.summary(), "has_drift": schema_diff.has_drift}
             if schema_diff is not None else None
@@ -178,6 +190,8 @@ def analyze(
             joins=joins_data,
             insights=insights_data,
             diff=diff_summary,
+            schema_drift_json=schema_diff.to_schema_drift_json() if schema_diff is not None else None,
+            coverage_drift_json=schema_diff.to_coverage_drift_json() if schema_diff is not None else None,
             warnings=[],
         )
         result.decision = build_decision_layer(result, schema_diff)

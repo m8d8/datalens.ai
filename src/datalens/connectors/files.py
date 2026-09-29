@@ -1,18 +1,35 @@
 """
-File connector — CSV, JSON, XML, XLSX support.
+File connector — CSV, JSON, JSONL, XML, XLSX support.
 
 Handles local files with:
 - CSV: auto-infer headers, flag when missing (col_1..col_n)
 - JSON: --root path to specify array/record root
+- JSONL: one JSON record per line, streamed without loading the whole file
 - XML: --root element to specify repeating record element
 - XLSX: --sheets to select specific sheets (default: all)
+
+'path' may point at a single file, or at a directory — in which case every
+supported file underneath becomes its own object (like separate tables/sheets
+in one report). Use 'pattern' to filter (e.g. "*.jsonl.gz") and 'recursive'
+to also scan subdirectories.
+
+Transparent decompression:
+- .gz: gzip-compressed files, e.g. "data.jsonl.gz" (CSV/JSON/JSONL/XML only)
+- .zip: zip archives containing a single data file, e.g. "data.csv.zip".
+  If the archive holds multiple files, specify which one via the
+  'member' source_spec key.
 """
 
 from __future__ import annotations
 
 import csv
+import gzip
+import io
 import json
+import logging
 import xml.etree.ElementTree as ET
+import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 
@@ -21,20 +38,25 @@ from datalens.connectors.base import Connector, ObjectRef, Record
 if TYPE_CHECKING:
     from datalens.config import Config
 
+logger = logging.getLogger(__name__)
+
 
 class FileConnector(Connector):
-    """Connector for local file sources (CSV, JSON, XML, XLSX)."""
+    """Connector for local file sources (CSV, JSON, JSONL, XML, XLSX)."""
 
-    SUPPORTED_EXTENSIONS = {".csv", ".json", ".xml", ".xlsx", ".xls"}
+    SUPPORTED_EXTENSIONS = {".csv", ".json", ".jsonl", ".xml", ".xlsx", ".xls"}
+    COMPRESSED_EXTENSIONS = {".gz", ".zip"}
 
     def __init__(self, source_spec: dict[str, Any], config: "Config") -> None:
         super().__init__(source_spec, config)
         self._path: Path | None = None
         self._file_type: str | None = None
+        self._compression: str | None = None
+        self._zip_member: str | None = None
         self._objects: list[ObjectRef] = []
 
     def connect(self) -> None:
-        """Validate file exists and determine type."""
+        """Validate the path exists and build the list of objects to sample."""
         path_str = self.source_spec.get("path")
         if not path_str:
             raise ValueError("File source requires 'path' in source_spec")
@@ -44,37 +66,183 @@ class FileConnector(Connector):
         if not self._path.exists():
             raise FileNotFoundError(f"File not found: {self._path}")
 
-        ext = self._path.suffix.lower()
-        if ext not in self.SUPPORTED_EXTENSIONS:
+        if self._path.is_dir():
+            self._objects = self._list_directory_objects(self._path)
+        else:
+            inner_ext, compression, zip_member = self._classify(self._path, strict=True)
+            self._objects = self._objects_for_file(self._path, inner_ext, compression, zip_member)
+
+        self._connected = True
+
+    def _list_directory_objects(self, directory: Path) -> list[ObjectRef]:
+        """Build one ObjectRef per supported file found under a directory."""
+        pattern = self.source_spec.get("pattern")
+        recursive = bool(self.source_spec.get("recursive", False))
+
+        if pattern:
+            candidates = directory.glob(pattern)
+        else:
+            candidates = directory.rglob("*") if recursive else directory.glob("*")
+        candidates = sorted(p for p in candidates if p.is_file())
+
+        objects: list[ObjectRef] = []
+        for path in candidates:
+            classified = self._classify(path, strict=False)
+            if classified is None:
+                continue
+            inner_ext, compression, zip_member = classified
+
+            rel_dir = path.parent.relative_to(directory)
+            for obj in self._objects_for_file(path, inner_ext, compression, zip_member):
+                if str(rel_dir) != ".":
+                    obj.name = f"{rel_dir.as_posix()}/{obj.name}"
+                objects.append(obj)
+
+        if not objects:
             raise ValueError(
-                f"Unsupported file type: {ext}. "
+                f"No supported data files found in directory: {directory} "
+                f"(supported: {', '.join(sorted(self.SUPPORTED_EXTENSIONS))}, "
+                "optionally .gz/.zip compressed)"
+            )
+
+        return objects
+
+    def _classify(
+        self, path: Path, *, strict: bool
+    ) -> tuple[str, str | None, str | None] | None:
+        """
+        Determine (inner_extension, compression, zip_member) for a data file path.
+
+        In strict mode (single-file source), unsupported/ambiguous files raise.
+        Otherwise (directory scan) they are skipped by returning None.
+        """
+        outer_ext = path.suffix.lower()
+        zip_member: str | None = None
+
+        if outer_ext == ".gz":
+            compression: str | None = "gzip"
+            inner_ext = Path(path.stem).suffix.lower()
+        elif outer_ext == ".zip":
+            compression = "zip"
+            zip_member = self._resolve_zip_member(path, strict=strict)
+            if zip_member is None:
+                return None
+            inner_ext = Path(zip_member).suffix.lower()
+        else:
+            compression = None
+            inner_ext = outer_ext
+
+        if inner_ext not in self.SUPPORTED_EXTENSIONS:
+            if not strict:
+                logger.debug("Skipping unsupported file: %s", path)
+                return None
+            raise ValueError(
+                f"Unsupported file type: {inner_ext or outer_ext}. "
                 f"Supported: {', '.join(sorted(self.SUPPORTED_EXTENSIONS))}"
             )
 
-        self._file_type = ext
-        self._connected = True
+        if compression and inner_ext in {".xlsx", ".xls"}:
+            if not strict:
+                logger.debug("Skipping compressed Excel file: %s", path)
+                return None
+            raise ValueError("Compressed Excel files are not supported")
 
-        # Build object list
-        if ext in {".xlsx", ".xls"}:
-            self._objects = self._list_excel_sheets()
-        else:
-            # Single object for CSV/JSON/XML
-            self._objects = [
-                ObjectRef(
-                    name=self._path.stem,
-                    label=self.source_spec.get("label"),
-                    metadata={"path": str(self._path), "type": ext},
+        return inner_ext, compression, zip_member
+
+    def _resolve_zip_member(self, path: Path, *, strict: bool) -> str | None:
+        """Pick which entry inside a zip archive to read as the data file."""
+        requested_member = self.source_spec.get("member")
+        with zipfile.ZipFile(path) as zf:
+            members = [name for name in zf.namelist() if not name.endswith("/")]
+
+        if not members:
+            if not strict:
+                logger.debug("Skipping empty zip archive: %s", path)
+                return None
+            raise ValueError(f"Zip archive is empty: {path}")
+
+        if requested_member:
+            if requested_member not in members:
+                if not strict:
+                    logger.debug("Member '%s' not found in %s", requested_member, path)
+                    return None
+                raise ValueError(
+                    f"Member '{requested_member}' not found in zip archive. "
+                    f"Available: {', '.join(members)}"
                 )
-            ]
+            return requested_member
 
-    def _list_excel_sheets(self) -> list[ObjectRef]:
+        if len(members) == 1:
+            return members[0]
+
+        if not strict:
+            logger.warning(
+                "Skipping zip archive with multiple entries (specify 'member' to read one): %s",
+                path,
+            )
+            return None
+        raise ValueError(
+            f"Zip archive contains multiple files; specify one via 'member' "
+            f"in source_spec. Available: {', '.join(members)}"
+        )
+
+    def _objects_for_file(
+        self,
+        path: Path,
+        inner_ext: str,
+        compression: str | None,
+        zip_member: str | None,
+    ) -> list[ObjectRef]:
+        """Build the ObjectRef(s) produced by a single resolved data file."""
+        if inner_ext in {".xlsx", ".xls"}:
+            return self._list_excel_sheets(path)
+
+        if compression == "gzip":
+            name = Path(path.stem).stem
+        elif compression == "zip" and zip_member:
+            name = Path(zip_member).stem
+        else:
+            name = path.stem
+
+        metadata: dict[str, Any] = {"path": str(path), "type": inner_ext}
+        if compression:
+            metadata["compression"] = compression
+        if zip_member:
+            metadata["zip_member"] = zip_member
+
+        return [
+            ObjectRef(
+                name=name,
+                label=self.source_spec.get("label"),
+                metadata=metadata,
+            )
+        ]
+
+    @contextmanager
+    def _open_text(self, *, newline: str | None = None) -> Iterator[Any]:
+        """Open the data file as a text stream, transparently decompressing gz/zip."""
+        assert self._path is not None
+
+        if self._compression == "gzip":
+            with gzip.open(self._path, mode="rt", encoding="utf-8-sig", newline=newline) as f:
+                yield f
+        elif self._compression == "zip":
+            assert self._zip_member is not None
+            with zipfile.ZipFile(self._path) as zf, zf.open(self._zip_member) as raw:
+                with io.TextIOWrapper(raw, encoding="utf-8-sig", newline=newline) as f:
+                    yield f
+        else:
+            with open(self._path, encoding="utf-8-sig", newline=newline) as f:
+                yield f
+
+    def _list_excel_sheets(self, path: Path) -> list[ObjectRef]:
         """List sheets in an Excel file."""
         try:
             import openpyxl
         except ImportError:
             raise ImportError("openpyxl is required for Excel files: uv add openpyxl")
 
-        wb = openpyxl.load_workbook(self._path, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         sheet_names = wb.sheetnames
         wb.close()
 
@@ -89,7 +257,7 @@ class FileConnector(Connector):
             ObjectRef(
                 name=sheet,
                 label=self.source_spec.get("label"),
-                metadata={"path": str(self._path), "type": ".xlsx", "sheet": sheet},
+                metadata={"path": str(path), "type": ".xlsx", "sheet": sheet},
             )
             for sheet in sheet_names
         ]
@@ -111,6 +279,13 @@ class FileConnector(Connector):
         if not self._connected:
             raise RuntimeError("Not connected. Call connect() first.")
 
+        # Directory sources mix files with different types/compression, so each
+        # object carries its own path — re-sync connector state before reading.
+        self._path = Path(obj.metadata["path"])
+        self._file_type = obj.metadata["type"]
+        self._compression = obj.metadata.get("compression")
+        self._zip_member = obj.metadata.get("zip_member")
+
         # Get sample_size: None means use config default, 0 means full scan
         if sample_size is None:
             sample_size = self.config.sample_size
@@ -119,6 +294,8 @@ class FileConnector(Connector):
             yield from self._sample_csv(sample_size)
         elif self._file_type == ".json":
             yield from self._sample_json(sample_size, max_depth)
+        elif self._file_type == ".jsonl":
+            yield from self._sample_jsonl(sample_size)
         elif self._file_type == ".xml":
             yield from self._sample_xml(sample_size)
         elif self._file_type in {".xlsx", ".xls"}:
@@ -126,9 +303,7 @@ class FileConnector(Connector):
 
     def _sample_csv(self, sample_size: int) -> Iterator[Record]:
         """Sample records from CSV file."""
-        assert self._path is not None
-
-        with open(self._path, newline="", encoding="utf-8-sig") as f:
+        with self._open_text(newline="") as f:
             # Sniff to detect dialect and headers
             sample_text = f.read(8192)
             f.seek(0)
@@ -166,9 +341,7 @@ class FileConnector(Connector):
 
     def _sample_json(self, sample_size: int, max_depth: int | None) -> Iterator[Record]:
         """Sample records from JSON file."""
-        assert self._path is not None
-
-        with open(self._path, encoding="utf-8") as f:
+        with self._open_text() as f:
             data = json.load(f)
 
         # Navigate to root if specified
@@ -197,13 +370,30 @@ class FileConnector(Connector):
             else:
                 yield {"value": record}
 
+    def _sample_jsonl(self, sample_size: int) -> Iterator[Record]:
+        """Sample records from a JSONL (newline-delimited JSON) file, streaming line by line."""
+        count = 0
+        with self._open_text() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # sample_size=0 means full scan (no limit)
+                if sample_size > 0 and count >= sample_size:
+                    break
+                record = json.loads(line)
+                if isinstance(record, dict):
+                    yield record
+                else:
+                    yield {"value": record}
+                count += 1
+
     def _sample_xml(self, sample_size: int) -> Iterator[Record]:
         """Sample records from XML file."""
-        assert self._path is not None
-
         root_element = self.source_spec.get("root", "*")
 
-        tree = ET.parse(self._path)
+        with self._open_text() as f:
+            tree = ET.parse(f)
         root = tree.getroot()
 
         # Find all elements matching the root pattern
@@ -287,4 +477,6 @@ class FileConnector(Connector):
         """Clean up resources."""
         self._connected = False
         self._path = None
+        self._compression = None
+        self._zip_member = None
         self._objects = []

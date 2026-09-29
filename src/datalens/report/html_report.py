@@ -864,6 +864,40 @@ def _render_trends_drift(
         </div>
     """)
 
+    # Coverage threshold breaches — a field/object/dataset-configured %-point
+    # variance was crossed (see history.diff.resolve_coverage_threshold). Shown
+    # up front, distinct from the "normal" Coverage Shifts table below.
+    breaches = [c for c in (getattr(diff, "coverage_changes", []) or []) if c.get("breach")]
+    if breaches:
+        breach_badge_cls = "badge-danger" if any(c.get("direction") == "decrease" for c in breaches) else "badge-warning"
+        rows = ""
+        for c in breaches:
+            delta = c.get("delta", c.get("new_coverage", 0.0) - c.get("old_coverage", 0.0))
+            arrow = "▲" if c.get("direction") == "increase" else "▼"
+            color = "var(--color-success)" if c.get("direction") == "increase" else "var(--color-danger)"
+            threshold = c.get("threshold")
+            threshold_label = f"{threshold:.0f}% ({c.get('threshold_scope', 'default')})" if threshold is not None else "—"
+            rows += f"""<tr>
+                <td><span class="object-name">{html.escape(c.get('object',''))}</span></td>
+                <td><code>{html.escape(c.get('field',''))}</code></td>
+                <td class="text-center">{c.get('old_coverage', 0.0):.0f}%</td>
+                <td class="text-center">{c.get('new_coverage', 0.0):.0f}%</td>
+                <td class="text-center" style="color:{color};font-weight:600">{arrow} {abs(delta):.0f} pts</td>
+                <td class="text-center">{html.escape(threshold_label)}</td>
+            </tr>"""
+        sections.append(f"""
+            <div class="card">
+                <div class="card-header"><h3>⚠️ Coverage Threshold Breaches
+                    <span class="badge {breach_badge_cls}">{len(breaches)}</span></h3></div>
+                <div class="card-body"><div class="table-container">
+                    <table class="data-table sortable drift-table"><thead><tr>
+                    <th>Object</th><th>Field</th><th class="text-center">Was</th>
+                    <th class="text-center">Now</th><th class="text-center">Change</th>
+                    <th class="text-center">Threshold</th>
+                </tr></thead><tbody>{rows}</tbody></table></div></div>
+            </div>
+        """)
+
     # Added / removed objects
     sections.append(_list_card("New Objects", getattr(diff, "added_objects", []), "badge-success"))
     sections.append(_list_card("Removed Objects", getattr(diff, "removed_objects", []), "badge-danger"))
@@ -911,12 +945,16 @@ def _render_trends_drift(
             delta = new - old
             arrow = "▲" if delta > 0 else "▼"
             color = "var(--color-success)" if delta > 0 else "var(--color-danger)"
+            breach_badge = (
+                '<span class="badge badge-danger" style="margin-left:6px">breach</span>'
+                if c.get("breach") else ""
+            )
             rows += f"""<tr>
                 <td><span class="object-name">{html.escape(c.get('object',''))}</span></td>
                 <td><code>{html.escape(c.get('field',''))}</code></td>
                 <td class="text-center">{old:.0f}%</td>
                 <td class="text-center">{new:.0f}%</td>
-                <td class="text-center" style="color:{color};font-weight:600">{arrow} {abs(delta):.0f} pts</td>
+                <td class="text-center" style="color:{color};font-weight:600">{arrow} {abs(delta):.0f} pts{breach_badge}</td>
                 <td>{_before_after_dist(c.get('object',''), c.get('field',''), prev_index, cur_index)}</td>
             </tr>"""
         sections.append(f"""

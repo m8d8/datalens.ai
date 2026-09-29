@@ -5,9 +5,9 @@ History Store — versioned storage of analysis artifacts.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 class HistoryStore:
@@ -132,3 +132,45 @@ class HistoryStore:
             shutil.rmtree(version_dir)
             return True
         return False
+
+    def purge_expired(
+        self,
+        retention_days: int,
+        protected_tags: Iterable[str] | None = None,
+    ) -> list[str]:
+        """
+        Delete saved runs older than ``retention_days``, keeping protected tags forever.
+
+        Args:
+            retention_days: Runs saved more than this many days ago are deleted.
+                0 (or negative) disables purging entirely (no-op).
+            protected_tags: Version tags that are never purged regardless of age
+                (case-insensitive), e.g. {"baseline"}.
+
+        Returns:
+            List of version tags that were deleted.
+        """
+        if retention_days <= 0:
+            return []
+
+        protected = {t.lower() for t in (protected_tags or ())}
+        cutoff = datetime.now() - timedelta(days=retention_days)
+        deleted: list[str] = []
+
+        for version in self.list_versions():
+            tag = version.get("version_tag", "")
+            if not tag or tag.lower() in protected:
+                continue
+
+            timestamp_str = version.get("timestamp")
+            if not timestamp_str:
+                continue
+            try:
+                timestamp = datetime.fromisoformat(timestamp_str)
+            except ValueError:
+                continue
+
+            if timestamp < cutoff and self.delete(tag):
+                deleted.append(tag)
+
+        return deleted

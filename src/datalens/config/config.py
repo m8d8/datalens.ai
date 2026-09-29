@@ -48,6 +48,27 @@ class Config:
     low_cardinality_threshold: int = 50
     """Fields with <= this many distinct values are flagged as low cardinality."""
 
+    # Coverage drift thresholds (dataset/object/field-level %-point variance).
+    # Empty dict = feature disabled (existing coverage_changes reporting is unaffected).
+    coverage_thresholds: dict[str, Any] = field(default_factory=dict)
+    """
+    Coverage-change breach thresholds, most to least specific:
+    {"dataset": 50.0, "objects": {"Obj": 40.0}, "fields": {"Obj": {"path": 20.0}}}
+    """
+
+    report_coverage_reduction_exceeds: bool = True
+    """Flag fields whose coverage dropped beyond their resolved threshold."""
+
+    report_coverage_increase_exceeds: bool = True
+    """Flag fields whose coverage rose beyond their resolved threshold."""
+
+    # History retention (see history.store.HistoryStore.purge_expired)
+    history_retention_days: int = 0
+    """Delete saved .history runs older than this many days. 0 = keep forever."""
+
+    history_protected_tags: list[str] = field(default_factory=lambda: ["baseline"])
+    """Version tags exempt from retention pruning regardless of age (case-insensitive)."""
+
     # Output
     out_dir: str = "output"
     """Output directory for generated artifacts."""
@@ -128,6 +149,7 @@ def load_config(
     config_file: str | Path | None = None,
     secrets_file: str | Path | None = None,
     connection_config_file: str | Path | None = None,
+    env: str | None = None,
     **overrides: Any,
 ) -> Config:
     """
@@ -136,13 +158,19 @@ def load_config(
     Precedence (lowest to highest):
     1. Defaults (Config dataclass defaults)
     2. Environment variables (DATALENS_* env vars)
-    3. Config file (YAML)
-    4. CLI overrides (from --flags)
+    3. Auto-discovered global config: .datalens/config.yaml or ~/.datalens/config.yaml
+    4. Auto-discovered env-swimlane overlay: .datalens/config-{env}.yaml or
+       ~/.datalens/config-{env}.yaml (env = ``env`` arg, else DATALENS_ENV)
+    5. Explicit --config file (YAML)
+    6. CLI overrides (from --flags)
 
     Args:
         config_file: Path to YAML config file. None = use defaults.
         secrets_file: Path to YAML secrets file. None = skip secrets.
         connection_config_file: Path to connection config file. None = skip.
+        env: Environment swimlane name (e.g. "dev", "staging", "prod"). Selects
+            config-{env}.yaml as an overlay on top of the base config. Falls
+            back to the DATALENS_ENV env var when not passed explicitly.
         **overrides: Additional overrides (from CLI flags, highest precedence).
 
     Returns:
@@ -156,7 +184,19 @@ def load_config(
     # Step 2: Apply environment variable overrides
     config.apply_env_overrides()
 
-    # Step 3: Load config file and merge (overrides env vars)
+    # Step 3: Auto-discovered global config + env-swimlane overlay (both optional).
+    # Mirrors the secrets auto-discovery below; explicit --config always wins over these.
+    for key, value in _load_global_config_defaults().items():
+        if hasattr(config, key):
+            setattr(config, key, value)
+
+    env = env or os.environ.get("DATALENS_ENV")
+    if env:
+        for key, value in _load_global_config_defaults(env=env).items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+
+    # Step 4: Load explicit --config file and merge (overrides everything above)
     if config_file:
         config_path = Path(config_file)
         if config_path.exists():
@@ -178,15 +218,41 @@ def load_config(
         secrets = _load_secrets_from_defaults()
     config.secrets = secrets
 
-    # Step 4: Apply CLI overrides (highest precedence)
+    # Step 5: Apply CLI overrides (highest precedence). A value of None means
+    # "not explicitly provided" — skip it so the layers below (auto-discovered
+    # config, env vars, dataclass default) aren't clobbered with None.
     for key, value in overrides.items():
-        if hasattr(config, key):
+        if value is not None and hasattr(config, key):
             setattr(config, key, value)
 
     if connection_config_file:
         config.connection_config_file = str(connection_config_file)
 
     return config
+
+
+def _load_global_config_defaults(env: str | None = None) -> dict[str, Any]:
+    """
+    Search for the global app config file in standard locations (in order):
+    1. .datalens/config[-{env}].yaml (project-local)
+    2. ~/.datalens/config[-{env}].yaml (user-global)
+
+    Mirrors _load_secrets_from_defaults(). Returns {} if none exist. This is
+    what powers env-swimlane config (dev/staging/prod), e.g. config-prod.yaml.
+    """
+    suffix = f"-{env}" if env else ""
+    search_paths = [
+        Path(f".datalens/config{suffix}.yaml"),
+        Path.home() / ".datalens" / f"config{suffix}.yaml",
+    ]
+
+    for path in search_paths:
+        if path.exists():
+            return _load_yaml(path)
+
+    return {}
+
+
 
 
 def _load_secrets_from_defaults() -> dict[str, Any]:
