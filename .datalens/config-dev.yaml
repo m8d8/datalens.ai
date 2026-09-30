@@ -35,13 +35,6 @@ low_cardinality_threshold: 50  # Fields with <= N distinct values
 # report_coverage_reduction_exceeds: true   # flag coverage drops beyond threshold
 # report_coverage_increase_exceeds: true    # flag coverage rises beyond threshold
 
-# History retention (.history/ saved runs, used for --detect-drift / --compare-to).
-# 0 = keep every run forever (default). Runs older than this many days are
-# deleted the next time `datalens analyze` runs; tags in history_protected_tags
-# (default: just "baseline") are always kept regardless of age.
-# history_retention_days: 30
-# history_protected_tags: ["baseline"]
-
 # Output
 out_dir: "output"          # Output directory
 
@@ -56,7 +49,8 @@ mask_pii: true             # Mask detected PII in reports
 # cursor    = Cursor subscription via cursor-agent login, or CURSOR_API_KEY
 # copilot   = GitHub Copilot via `gh auth login` + `gh copilot`
 # claude    = Claude Code / Desktop CLI (`claude` on PATH)
-ai_provider: "off"
+#ai_provider: "off"
+ai_provider: "copilot"
 
 # Debug
 debug: false

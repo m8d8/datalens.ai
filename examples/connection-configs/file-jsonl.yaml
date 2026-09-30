@@ -1,0 +1,79 @@
+# Local JSONL File (optionally gzip/zip compressed)
+# Use for: newline-delimited JSON (one JSON object per line)
+
+name: local_jsonl_data
+source_type: file
+description: "Local JSONL File, Streamed Line by Line"
+
+params:
+  # File path — supports plain .jsonl as well as compressed variants:
+  #   records.jsonl        (plain)
+  #   records.jsonl.gz     (gzip-compressed, decompressed transparently)
+  #   records.jsonl.zip    (zip archive with a single .jsonl entry)
+  #
+  # A directory also works — every supported file underneath becomes its own
+  # object in the report (e.g. one entry per exported shard):
+  #   path: "${DATA_DIR}/exports/"
+  #   pattern: "*.jsonl.gz"    # optional glob filter
+  #   recursive: true          # optional, scans subdirectories too (default: false)
+  path: "${DATA_DIR}/orders_sample.jsonl.gz"
+
+  # If a .zip archive contains multiple files, specify which entry to read:
+  # member: "records.jsonl"
+
+profiling:
+  sample_size: 10000
+  max_depth: 10
+
+# Optional: coverage-drift breach thresholds (used with --detect-drift /
+# --compare-to). Most-specific wins: field > object > dataset. A field/object
+# is flagged as a "breach" in the report + coverage-drift JSON only when its
+# resolved threshold is exceeded; smaller coverage moves still show normally.
+# drift:
+#   coverage_thresholds:
+#     dataset: 50                       # global default (%-points), applies to everything below
+#     objects:
+#       orders_sample: 40                # overrides dataset for all of this object's fields
+#     fields:
+#       orders_sample:
+#         "customer.email": 20           # overrides object/dataset for this one field
+#   report_reduction_threshold_exceeds: true   # flag coverage drops beyond threshold
+#   report_increase_threshold_exceeds: true    # flag coverage rises beyond threshold
+
+# Optional: how long to keep saved runs under .history/ (used for --detect-drift
+# / --compare-to). 0 = keep forever (default). Tags in protected_tags are never
+# deleted regardless of age.
+# history:
+#   retention_days: 30
+#   protected_tags: ["baseline"]
+
+metadata:
+  created: "2026-09-01"
+  tags: ["file", "jsonl", "gzip", "local"]
+
+# Usage:
+# export DATA_DIR="test_data"   # try it now against the synthetic sample in this repo
+# datalens analyze --cc local_jsonl_data
+#
+# Or point at your own data:
+# export DATA_DIR="/data/exports"
+# (place your own orders_sample.jsonl.gz there, or change path above)
+
+# Compression support (applies to CSV/JSON/JSONL/XML, not Excel):
+# path value                  | how it's read
+# ─────────────────────────────────────────────────
+# "data.jsonl"                | read directly
+# "data.jsonl.gz"             | gunzip'd on the fly
+# "data.jsonl.zip"            | single entry read from the zip archive
+# "data.jsonl.zip" + member   | that named entry read from a multi-file zip
+
+# JSONL example (one compact JSON object per line):
+# {"order_id": "ORD-1001", "customer": {"name": "Jordan Lee", "email": "jordan.lee@example.com"}, "status": "shipped"}
+# {"order_id": "ORD-1002", "customer": {"name": "Priya Nair", "email": null}, "status": "pending"}
+
+# See what changed since a specific past run (schema + coverage drift):
+#   datalens analyze --cc local_jsonl_data --version-tag 2026-09-05          # "3 days ago"
+#   datalens analyze --source file --path test_data/orders_sample.json \
+#     --out-dir output --compare-to 2026-09-05
+# (test_data/orders_sample.json is a modified synthetic export — renamed/added/
+# removed fields, a type change, and a coverage drop — for exercising this.)

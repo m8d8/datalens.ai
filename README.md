@@ -56,7 +56,7 @@ It learns from the data in front of it — no baked-in business vocabulary — s
 
 ```bash
 # Clone the repository
-git clone https://github.com/datalens-ai/datalens.git
+git clone https://github.com/m8d8/datalens.ai.git
 cd datalens
 
 # Install with uv (recommended) or pip

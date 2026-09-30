@@ -7,6 +7,41 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# Fallback breach threshold (percentage points) when coverage_thresholds is
+# enabled but no dataset/object/field override applies.
+DEFAULT_COVERAGE_BREACH_THRESHOLD = 10.0
+
+
+def resolve_coverage_threshold(
+    thresholds: dict[str, Any],
+    object_name: str,
+    field_path: str,
+) -> tuple[float, str]:
+    """
+    Resolve the coverage-change breach threshold (percentage points) for a field.
+
+    Precedence, most to least specific:
+      1. thresholds["fields"][object_name][field_path]
+      2. thresholds["objects"][object_name]
+      3. thresholds["dataset"] (global default)
+      4. DEFAULT_COVERAGE_BREACH_THRESHOLD
+
+    Returns:
+        (threshold, scope) where scope is "field" | "object" | "dataset" | "default".
+    """
+    field_overrides = (thresholds.get("fields") or {}).get(object_name) or {}
+    if field_path in field_overrides:
+        return float(field_overrides[field_path]), "field"
+
+    object_overrides = thresholds.get("objects") or {}
+    if object_name in object_overrides:
+        return float(object_overrides[object_name]), "object"
+
+    if thresholds.get("dataset") is not None:
+        return float(thresholds["dataset"]), "dataset"
+
+    return DEFAULT_COVERAGE_BREACH_THRESHOLD, "default"
+
 
 @dataclass
 class SchemaDiff:
@@ -23,7 +58,9 @@ class SchemaDiff:
     # Type changes
     type_changes: list[dict[str, Any]] = field(default_factory=list)
 
-    # Coverage changes (significant shifts)
+    # Coverage changes (significant shifts). Each entry also carries
+    # direction/threshold/threshold_scope/breach when coverage_thresholds
+    # was configured (see resolve_coverage_threshold).
     coverage_changes: list[dict[str, Any]] = field(default_factory=list)
 
     # Cardinality changes
@@ -41,6 +78,39 @@ class SchemaDiff:
             or self.coverage_changes
             or self.cardinality_changes
         )
+
+    @property
+    def coverage_breaches(self) -> list[dict[str, Any]]:
+        """Coverage changes that exceeded their resolved threshold (breach=True)."""
+        return [c for c in self.coverage_changes if c.get("breach")]
+
+    def to_schema_drift_json(self) -> dict[str, Any]:
+        """Machine-readable schema-drift artifact (objects/fields/types) for CI/CD."""
+        return {
+            "has_drift": self.has_drift,
+            "added_objects": self.added_objects,
+            "removed_objects": self.removed_objects,
+            "added_fields": self.added_fields,
+            "removed_fields": self.removed_fields,
+            "type_changes": self.type_changes,
+        }
+
+    def to_coverage_drift_json(self) -> dict[str, Any]:
+        """Machine-readable coverage-drift artifact (per-field %-change + threshold breaches) for CI/CD."""
+        breaches = self.coverage_breaches
+        reduction_breaches = [c for c in breaches if c.get("direction") == "decrease"]
+        increase_breaches = [c for c in breaches if c.get("direction") == "increase"]
+        return {
+            "coverage_changes": self.coverage_changes,
+            "breaches": breaches,
+            "summary": {
+                "total_changes": len(self.coverage_changes),
+                "total_breaches": len(breaches),
+                "reduction_breaches": len(reduction_breaches),
+                "increase_breaches": len(increase_breaches),
+                "any_breach": bool(breaches),
+            },
+        }
 
     def summary(self) -> str:
         """Generate a human-readable summary of changes."""
@@ -123,6 +193,9 @@ def compare_schemas(
     new_schema: dict[str, Any],
     coverage_threshold: float = 10.0,
     type_minor_threshold: float = 0.02,
+    coverage_thresholds: dict[str, Any] | None = None,
+    report_reduction_exceeds: bool = True,
+    report_increase_exceeds: bool = True,
 ) -> SchemaDiff:
     """
     Compare two schema versions and identify differences.
@@ -134,11 +207,19 @@ def compare_schemas(
         type_minor_threshold: Minimum share (0–1) of non-null values a type must
             represent to count toward a type change. Shapes below this are
             treated as sampling noise and ignored (default: 0.02 = 2%).
+        coverage_thresholds: Optional dataset/object/field breach thresholds
+            (see ``resolve_coverage_threshold``). Empty/None disables breach
+            detection entirely — coverage_changes reporting is unaffected.
+        report_reduction_exceeds: When breach detection is enabled, flag fields
+            whose coverage *dropped* beyond their resolved threshold.
+        report_increase_exceeds: When breach detection is enabled, flag fields
+            whose coverage *rose* beyond their resolved threshold.
 
     Returns:
         SchemaDiff with all detected changes.
     """
     diff = SchemaDiff()
+    thresholds_enabled = bool(coverage_thresholds)
 
     old_objects = {obj["object"]: obj for obj in old_schema.get("objects", [])}
     new_objects = {obj["object"]: obj for obj in new_schema.get("objects", [])}
@@ -181,18 +262,41 @@ def compare_schemas(
                     "new_types": sorted(new_types),
                 })
 
-            # Coverage changes
+            # Coverage changes — "coverage" means *meaningfully present* (key
+            # exists and isn't null/empty), matching the rest of the report
+            # (e.g. the Field Explorer's effective-coverage calculation).
             old_sampled = old_obj.get("sampled", 1) or 1
             new_sampled = new_obj.get("sampled", 1) or 1
-            old_coverage = old_field.get("presence_count", 0) / old_sampled * 100
-            new_coverage = new_field.get("presence_count", 0) / new_sampled * 100
+            old_effective = max(0, old_field.get("presence_count", 0) - old_field.get("null_empty_count", 0))
+            new_effective = max(0, new_field.get("presence_count", 0) - new_field.get("null_empty_count", 0))
+            old_coverage = old_effective / old_sampled * 100
+            new_coverage = new_effective / new_sampled * 100
+            delta = new_coverage - old_coverage
 
-            if abs(new_coverage - old_coverage) >= coverage_threshold:
+            direction = "increase" if delta > 0 else "decrease" if delta < 0 else "unchanged"
+            breach = False
+            threshold: float | None = None
+            threshold_scope: str | None = None
+            if thresholds_enabled:
+                threshold, threshold_scope = resolve_coverage_threshold(
+                    coverage_thresholds, obj_name, path
+                )
+                breach = abs(delta) >= threshold and (
+                    (direction == "decrease" and report_reduction_exceeds)
+                    or (direction == "increase" and report_increase_exceeds)
+                )
+
+            if abs(delta) >= coverage_threshold or breach:
                 diff.coverage_changes.append({
                     "object": obj_name,
                     "field": path,
                     "old_coverage": old_coverage,
                     "new_coverage": new_coverage,
+                    "delta": delta,
+                    "direction": direction,
+                    "threshold": threshold,
+                    "threshold_scope": threshold_scope,
+                    "breach": breach,
                 })
 
     return diff
@@ -203,6 +307,9 @@ def detect_drift(
     previous_schema: dict[str, Any] | None,
     coverage_threshold: float = 10.0,
     type_minor_threshold: float = 0.02,
+    coverage_thresholds: dict[str, Any] | None = None,
+    report_reduction_exceeds: bool = True,
+    report_increase_exceeds: bool = True,
 ) -> SchemaDiff | None:
     """
     Detect schema drift from previous version.
@@ -213,6 +320,9 @@ def detect_drift(
         coverage_threshold: Minimum coverage change % to report.
         type_minor_threshold: Minimum share (0–1) of non-null values a type must
             represent to count toward a type change (suppresses sampling noise).
+        coverage_thresholds: Optional dataset/object/field breach thresholds.
+        report_reduction_exceeds: Flag coverage drops beyond their threshold.
+        report_increase_exceeds: Flag coverage rises beyond their threshold.
 
     Returns:
         SchemaDiff if drift detected, None if no previous schema.
@@ -225,4 +335,7 @@ def detect_drift(
         current_schema,
         coverage_threshold=coverage_threshold,
         type_minor_threshold=type_minor_threshold,
+        coverage_thresholds=coverage_thresholds,
+        report_reduction_exceeds=report_reduction_exceeds,
+        report_increase_exceeds=report_increase_exceeds,
     )

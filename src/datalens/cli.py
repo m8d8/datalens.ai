@@ -11,6 +11,9 @@ Examples:
     # Analyze a JSON file with specific root
     datalens analyze --source file --path data.json --root items
 
+    # Analyze every supported file in a directory (one object per file)
+    datalens analyze --source file --path ./exports --pattern "*.jsonl.gz"
+
     # Analyze MongoDB collections
     datalens analyze --source mongodb --db mydb --collections users,orders
 
@@ -77,7 +80,11 @@ def _get_artifact_prefix(
         path = source_spec.get("path")
         if path:
             import os
-            return os.path.splitext(os.path.basename(path))[0].lower()[:20]
+            name = os.path.basename(path)
+            # Strip compression suffix so e.g. "data.jsonl.gz" -> "data"
+            if name.lower().endswith((".gz", ".zip")):
+                name = os.path.splitext(name)[0]
+            return os.path.splitext(name)[0].lower()[:20]
     elif source_lower == "s3":
         uri = source_spec.get("uri", "")
         if uri:
@@ -158,6 +165,15 @@ def cli() -> None:
     help="Comma-separated sheet names for Excel files (default: all)",
 )
 @click.option(
+    "--pattern",
+    help='Glob pattern to select files when --path is a directory (e.g. "*.jsonl.gz")',
+)
+@click.option(
+    "--recursive/--no-recursive",
+    default=None,
+    help="Scan subdirectories too when --path is a directory (default: top-level only)",
+)
+@click.option(
     "--db",
     help="Database name (for mongodb source)",
 )
@@ -178,8 +194,9 @@ def cli() -> None:
 @click.option(
     "--sample-size",
     type=int,
-    default=10000,
-    help="Number of records to sample per object (default: 10000, 0 = full scan)",
+    default=None,
+    help="Number of records to sample per object (default: 10000, or the connection config's "
+    "'profiling.sample_size' if set; 0 = full scan)",
 )
 @click.option(
     "--full-scan",
@@ -190,14 +207,16 @@ def cli() -> None:
 @click.option(
     "--max-depth",
     type=int,
-    default=10,
-    help="Maximum nesting depth to traverse (default: 10)",
+    default=None,
+    help="Maximum nesting depth to traverse (default: 10, or the connection config's "
+    "'profiling.max_depth' if set)",
 )
 @click.option(
     "--max-distinct",
     type=int,
-    default=100,
-    help="Maximum distinct values to track per field (default: 100)",
+    default=None,
+    help="Maximum distinct values to track per field (default: 100, or the connection config's "
+    "'profiling.max_distinct_values' if set)",
 )
 @click.option(
     "--config",
@@ -205,6 +224,13 @@ def cli() -> None:
     "config_file",
     type=click.Path(exists=True),
     help="Path to application config file (YAML)",
+)
+@click.option(
+    "--env",
+    "-e",
+    default=None,
+    help="Env swimlane (dev/staging/prod, ...) for config-{env}.yaml overlay "
+    "(default: $DATALENS_ENV). See .datalens/config.yaml / config-{env}.yaml.",
 )
 @click.option(
     "--cc",
@@ -246,6 +272,47 @@ def cli() -> None:
     help="Where versioned runs are stored for drift (default: <out-dir>/.history).",
 )
 @click.option(
+    "--history-retention-days",
+    type=int,
+    default=None,
+    help="Delete saved history runs older than N days (default: 0 = keep forever). "
+    "Tags in --history-protected-tag (default: 'baseline') are never deleted.",
+)
+@click.option(
+    "--history-protected-tag",
+    "history_protected_tags",
+    multiple=True,
+    help="Version tag to always keep regardless of age (can be repeated; default: 'baseline').",
+)
+@click.option(
+    "--coverage-threshold",
+    type=float,
+    default=None,
+    help="Dataset-level coverage-change breach threshold in %-points (applies to all objects/fields).",
+)
+@click.option(
+    "--object-coverage-threshold",
+    "object_coverage_thresholds",
+    multiple=True,
+    help='Object-level breach threshold: "OBJECT=PCT" (can be repeated).',
+)
+@click.option(
+    "--field-coverage-threshold",
+    "field_coverage_thresholds",
+    multiple=True,
+    help='Field-level breach threshold: "OBJECT.FIELD_PATH=PCT" (can be repeated).',
+)
+@click.option(
+    "--report-coverage-reduction/--no-report-coverage-reduction",
+    default=None,
+    help="Flag fields whose coverage dropped beyond their threshold (default: enabled).",
+)
+@click.option(
+    "--report-coverage-increase/--no-report-coverage-increase",
+    default=None,
+    help="Flag fields whose coverage rose beyond their threshold (default: enabled).",
+)
+@click.option(
     "--ai",
     type=click.Choice(
         ["off", "anthropic", "openai", "cursor", "copilot", "claude", "auto"],
@@ -269,15 +336,18 @@ def analyze_cmd(
     path: str | None,
     root: str | None,
     sheets: str | None,
+    pattern: str | None,
+    recursive: bool | None,
     db: str | None,
     collections: str | None,
     objects: tuple[str, ...],
     uri: str | None,
-    sample_size: int,
+    sample_size: int | None,
     full_scan: bool,
-    max_depth: int,
-    max_distinct: int,
+    max_depth: int | None,
+    max_distinct: int | None,
     config_file: str | None,
+    env: str | None,
     connection_config: str | None,
     secrets: str | None,
     out_dir: str,
@@ -285,6 +355,13 @@ def analyze_cmd(
     compare_to: str | None,
     detect_drift: bool,
     history_dir: str | None,
+    history_retention_days: int | None,
+    history_protected_tags: tuple[str, ...],
+    coverage_threshold: float | None,
+    object_coverage_thresholds: tuple[str, ...],
+    field_coverage_thresholds: tuple[str, ...],
+    report_coverage_reduction: bool | None,
+    report_coverage_increase: bool | None,
     ai: str,
     mask_pii: bool,
     debug: bool,
@@ -312,6 +389,8 @@ def analyze_cmd(
             path=path,
             root=root,
             sheets=sheets,
+            pattern=pattern,
+            recursive=recursive,
             db=db,
             collections=collections,
             objects=objects,
@@ -319,12 +398,18 @@ def analyze_cmd(
         )
 
         # Merge connection config if provided
+        conn_profiling: dict[str, Any] = {}
+        conn_drift: dict[str, Any] = {}
+        conn_history: dict[str, Any] = {}
         if connection_config:
             source_spec = _merge_connection_config(source_spec, connection_config, debug)
             # Display connection metadata if available
             try:
                 loader = ConnectionLoader()
                 conn_cfg = loader.load_connection(connection_config)
+                conn_profiling = conn_cfg.profiling or {}
+                conn_drift = conn_cfg.drift or {}
+                conn_history = conn_cfg.history or {}
                 if conn_cfg.metadata:
                     metadata_info = []
                     if conn_cfg.metadata.get("description"):
@@ -338,6 +423,38 @@ def analyze_cmd(
                         console.print(Panel("\n".join(metadata_info), title="Connection Info"))
             except Exception:
                 pass  # Silently skip if metadata can't be loaded
+
+        # Resolve sampling knobs: explicit CLI flag > connection config's
+        # 'profiling' section > global/env-swimlane config file > built-in
+        # default. --full-scan already forced sample_size=0 above, so it
+        # always wins. Leaving a value as None here lets load_config's own
+        # layering (auto-discovered config -> dataclass default) apply it.
+        if sample_size is None:
+            sample_size = conn_profiling.get("sample_size")
+        if max_depth is None:
+            max_depth = conn_profiling.get("max_depth")
+        if max_distinct is None:
+            max_distinct = conn_profiling.get("max_distinct_values")
+
+        # Resolve coverage-drift breach thresholds: explicit CLI flags (as a whole)
+        # override the connection config's 'drift' section entirely; otherwise fall
+        # back to it, then to the global/env-swimlane config file (None = unset).
+        cli_coverage_thresholds = _build_coverage_thresholds(
+            coverage_threshold, object_coverage_thresholds, field_coverage_thresholds
+        )
+        coverage_thresholds = cli_coverage_thresholds or conn_drift.get("coverage_thresholds") or None
+        if report_coverage_reduction is None:
+            report_coverage_reduction = conn_drift.get("report_reduction_threshold_exceeds")
+        if report_coverage_increase is None:
+            report_coverage_increase = conn_drift.get("report_increase_threshold_exceeds")
+
+        # Resolve history retention: explicit CLI flag > connection config's
+        # 'history' section > global/env-swimlane config file > default (0 = keep forever).
+        if history_retention_days is None:
+            history_retention_days = conn_history.get("retention_days")
+        protected_tags: list[str] | None = (
+            list(history_protected_tags) if history_protected_tags else conn_history.get("protected_tags")
+        )
 
         # Generate version tag first (needed for output dir naming)
         if not version_tag:
@@ -364,10 +481,16 @@ def analyze_cmd(
         # Load config with structured output directory
         config = load_config(
             config_file=config_file,
+            env=env,
             secrets_file=secrets,
             sample_size=sample_size,
             max_depth=max_depth,
             max_distinct_values=max_distinct,
+            coverage_thresholds=coverage_thresholds,
+            report_coverage_reduction_exceeds=report_coverage_reduction,
+            report_coverage_increase_exceeds=report_coverage_increase,
+            history_retention_days=history_retention_days,
+            history_protected_tags=protected_tags,
             out_dir=structured_out_dir,
             version_tag=version_tag,
             ai_provider=ai if ai != "auto" else "",
@@ -427,6 +550,22 @@ def analyze_cmd(
             if debug:
                 console.print(f"[yellow]Could not save run to history: {e}[/yellow]")
 
+        # Prune old runs beyond the configured retention window (protected tags kept forever).
+        if config.history_retention_days > 0:
+            try:
+                pruned = history_store.purge_expired(
+                    config.history_retention_days,
+                    protected_tags=config.history_protected_tags,
+                )
+                if pruned:
+                    console.print(
+                        f"🧹 Pruned {len(pruned)} history run(s) older than "
+                        f"{config.history_retention_days}d: {', '.join(pruned)}"
+                    )
+            except Exception as e:  # history is best-effort; never fail the run
+                if debug:
+                    console.print(f"[yellow]Could not prune history: {e}[/yellow]")
+
         # Save outputs to structured directory (from config)
         out_path = Path(config.out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
@@ -451,6 +590,27 @@ def analyze_cmd(
         md_file = out_path / f"{artifact_prefix}-datalens-summary.md"
         md_file.write_text(result.summary_md, encoding="utf-8")
         console.print(f"📝 Summary: [link=file://{md_file.absolute()}]{md_file}[/link]")
+
+        # Machine-readable drift artifacts (only produced when a previous run was compared).
+        if result.schema_drift_json is not None:
+            schema_drift_file = out_path / f"{artifact_prefix}-datalens-schema-drift.json"
+            schema_drift_file.write_text(
+                json.dumps(result.schema_drift_json, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            console.print(
+                f"🧬 Schema Drift JSON: [link=file://{schema_drift_file.absolute()}]{schema_drift_file}[/link]"
+            )
+
+        if result.coverage_drift_json is not None:
+            coverage_drift_file = out_path / f"{artifact_prefix}-datalens-coverage-drift.json"
+            coverage_drift_file.write_text(
+                json.dumps(result.coverage_drift_json, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            console.print(
+                f"📈 Coverage Drift JSON: [link=file://{coverage_drift_file.absolute()}]{coverage_drift_file}[/link]"
+            )
 
         # Save AI insights markdown when generated
         if result.ai_insights_md:
@@ -488,6 +648,56 @@ def analyze_cmd(
         sys.exit(1)
 
 
+def _parse_coverage_threshold_spec(spec: str) -> tuple[str, float]:
+    """Parse a 'KEY=PCT' coverage-threshold spec into (key, percentage)."""
+    if "=" not in spec:
+        raise click.UsageError(
+            f"Invalid threshold spec '{spec}'; expected KEY=PCT (e.g. \"orders_sample=40\")"
+        )
+    key, _, pct_str = spec.partition("=")
+    key = key.strip()
+    if not key:
+        raise click.UsageError(f"Invalid threshold spec '{spec}': missing key before '='")
+    try:
+        pct = float(pct_str.strip())
+    except ValueError:
+        raise click.UsageError(f"Invalid percentage in threshold spec '{spec}': '{pct_str}'")
+    return key, pct
+
+
+def _build_coverage_thresholds(
+    dataset: float | None,
+    object_specs: tuple[str, ...],
+    field_specs: tuple[str, ...],
+) -> dict[str, Any]:
+    """Build the coverage_thresholds dict consumed by history.diff from CLI flags."""
+    thresholds: dict[str, Any] = {}
+
+    if dataset is not None:
+        thresholds["dataset"] = dataset
+
+    if object_specs:
+        object_thresholds: dict[str, float] = {}
+        for spec in object_specs:
+            name, pct = _parse_coverage_threshold_spec(spec)
+            object_thresholds[name] = pct
+        thresholds["objects"] = object_thresholds
+
+    if field_specs:
+        field_thresholds: dict[str, dict[str, float]] = {}
+        for spec in field_specs:
+            key, pct = _parse_coverage_threshold_spec(spec)
+            obj_name, _, field_path = key.partition(".")
+            if not field_path:
+                raise click.UsageError(
+                    f"Invalid field threshold spec '{spec}'; expected OBJECT.FIELD_PATH=PCT"
+                )
+            field_thresholds.setdefault(obj_name, {})[field_path] = pct
+        thresholds["fields"] = field_thresholds
+
+    return thresholds
+
+
 def _build_source_spec(
     source: str,
     path: str | None,
@@ -497,6 +707,8 @@ def _build_source_spec(
     collections: str | None,
     objects: tuple[str, ...],
     uri: str | None,
+    pattern: str | None = None,
+    recursive: bool | None = None,
 ) -> dict[str, Any]:
     """Build source specification dict from CLI options.
 
@@ -518,6 +730,10 @@ def _build_source_spec(
             spec["root"] = root
         if sheets:
             spec["sheets"] = sheets
+        if pattern:
+            spec["pattern"] = pattern
+        if recursive:
+            spec["recursive"] = True
 
     elif source.lower() == "mongodb":
         if not db:
@@ -568,7 +784,7 @@ def _merge_connection_config(
             # Source type from --source flag takes precedence
             if source_spec["source"] != conn_config.source_type:
                 merged_spec["source"] = source_spec["source"]
-        elif key in ("path", "root", "sheets", "db", "collections", "objects", "uri"):
+        elif key in ("path", "root", "sheets", "pattern", "recursive", "db", "collections", "objects", "uri"):
             # Only add if provided in CLI (not None)
             if value is not None:
                 merged_spec[key] = value

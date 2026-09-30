@@ -7,7 +7,7 @@ Complete examples for all supported data source types. Copy any example and cust
 - **HTTP/REST APIs** — Bearer Token, Basic Auth, API Key
 - **MongoDB** — Atlas Cloud, Local/Self-Hosted
 - **Amazon S3** — S3 Data Lakes
-- **Local Files** — CSV, JSON, XML, Excel
+- **Local Files** — CSV, JSON, JSONL (gzip/zip), XML, Excel
 
 ---
 
@@ -105,6 +105,18 @@ For JSON files with optional root path specification.
 ```bash
 export DATA_DIR="/data/exports"
 datalens analyze --cc local_json_data
+```
+
+### JSONL Files (gzip/zip supported)
+📄 [file-jsonl.yaml](file-jsonl.yaml)
+
+For newline-delimited JSON, streamed line by line. Works with plain `.jsonl`
+files as well as `.jsonl.gz` and `.jsonl.zip` — compression is decompressed
+transparently, no extra config needed.
+
+```bash
+export DATA_DIR="/data/exports"
+datalens analyze --cc local_jsonl_data
 ```
 
 ### Excel Files

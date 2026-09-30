@@ -116,16 +116,26 @@ def drift_severity(diff: Any | None) -> str:
     ):
         return "high"
 
-    for ch in getattr(diff, "coverage_changes", []) or []:
+    coverage_changes = getattr(diff, "coverage_changes", []) or []
+
+    # A user-configured breach (coverage_thresholds) always counts as at least
+    # "high" for a reduction, or "medium" for an increase.
+    if any(ch.get("breach") and ch.get("direction") == "decrease" for ch in coverage_changes):
+        return "high"
+
+    for ch in coverage_changes:
         drop = ch.get("old_coverage", 0.0) - ch.get("new_coverage", 0.0)
         if drop >= DRIFT_COVERAGE_HIGH_DROP:
             return "high"
 
     notable_coverage = any(
         abs(ch.get("new_coverage", 0.0) - ch.get("old_coverage", 0.0)) >= DRIFT_COVERAGE_MED_SHIFT
-        for ch in (getattr(diff, "coverage_changes", []) or [])
+        for ch in coverage_changes
     )
-    if notable_coverage or getattr(diff, "cardinality_changes", None):
+    has_increase_breach = any(
+        ch.get("breach") and ch.get("direction") == "increase" for ch in coverage_changes
+    )
+    if notable_coverage or has_increase_breach or getattr(diff, "cardinality_changes", None):
         return "medium"
 
     # Only additions remain.

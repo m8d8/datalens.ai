@@ -26,6 +26,17 @@ class ConnectionConfig:
     source_type: str
     params: dict[str, Any]
     metadata: dict[str, Any] | None = None
+    profiling: dict[str, Any] | None = None
+    drift: dict[str, Any] | None = None
+    history: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.profiling is None:
+            self.profiling = {}
+        if self.drift is None:
+            self.drift = {}
+        if self.history is None:
+            self.history = {}
 
 
 class ConnectionLoader:
@@ -150,6 +161,9 @@ class ConnectionLoader:
         source_type = data.get("source_type") or data.get("type")
         params = data.get("params", {})
         metadata = data.get("metadata")
+        profiling = data.get("profiling") or {}
+        drift = data.get("drift") or {}
+        history = data.get("history") or {}
 
         if not name:
             raise ValueError(f"Connection config {path} missing 'name'")
@@ -166,7 +180,15 @@ class ConnectionLoader:
         # Substitute environment variables
         params = self._substitute_env_vars(params)
 
-        return ConnectionConfig(name=name, source_type=source_type, params=params, metadata=metadata)
+        return ConnectionConfig(
+            name=name,
+            source_type=source_type,
+            params=params,
+            metadata=metadata,
+            profiling=profiling,
+            drift=drift,
+            history=history,
+        )
 
     def _substitute_env_vars(self, obj: Any) -> Any:
         """Recursively substitute ${VAR} environment variables in object."""
