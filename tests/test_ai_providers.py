@@ -131,10 +131,11 @@ def test_html_ai_insights_tab_renders():
         auth_mode="license",
     )
     html = hr._render_ai_insights_tab(insights)
-    assert "AI-Generated" in html
-    assert "cursor" in html
-    assert "Unique ID Patterns" in html
-    assert "AI Recommendations" in html
+    assert "AI review" in html
+    assert "cursor" in html and "composer-2.5" in html
+    assert "Identifiers" in html  # unique_id_patterns section
+    assert "Recommendations" in html
+    assert 'class="air-card"' in html and "Expand all" in html
 
 
 def test_html_report_includes_ai_insights_tab():
@@ -145,7 +146,7 @@ def test_html_report_includes_ai_insights_tab():
     )
     html = hr.generate_html_report(_SCHEMA, Config(), ai_insights=insights)
     assert 'id="ai-insights"' in html
-    assert "AI Insights" in html
+    assert "AI Review" in html
 
 
 @pytest.mark.parametrize(
@@ -240,3 +241,34 @@ def test_run_ai_insights_disabled_returns_none():
     insights, md = run_ai_insights(result, config)
     assert insights is None
     assert md is None
+
+
+def test_model_is_auto_unless_configured_and_bad_model_falls_back(monkeypatch):
+    from datalens.ai.base import is_model_error
+    from datalens.ai.providers.claude_login import ClaudeLoginProvider
+    from datalens.config.config import Config
+
+    assert is_model_error("Error: model 'claude-nope' not found")
+    assert is_model_error("invalid model: foo")
+    assert not is_model_error("rate limit exceeded")
+
+    monkeypatch.delenv("DATALENS_CLAUDE_MODEL", raising=False)
+    auto = ClaudeLoginProvider(Config())
+    assert auto.display_model == "auto"
+
+    calls = []
+
+    def fake_run(cmd, timeout=180, cwd=None):
+        calls.append(list(cmd))
+        if "--model" in cmd:
+            return False, "", "API Error: model claude-nope not found"
+        return True, '{"data_story": "ok"}', ""
+
+    monkeypatch.setattr("datalens.ai.providers.claude_login.run_cli_prompt", fake_run)
+    provider = ClaudeLoginProvider(Config(ai_model="claude-nope"))
+    provider._cli_path = "claude"
+    monkeypatch.setattr(provider, "is_available", lambda: True)
+    ok, text = provider.complete("hi")
+    assert ok and text.startswith("{")
+    assert "--model" in calls[0] and "--model" not in calls[1]
+    assert "claude-nope" in provider.model_note and provider.display_model == "auto"

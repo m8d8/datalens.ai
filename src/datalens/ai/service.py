@@ -54,9 +54,15 @@ def run_ai_insights(result: "AnalysisResult", config: "Config") -> tuple[dict[st
         pii_summary=result.pii_summary,
         insights=result.insights,
         decision=result.decision,
+        drift=(
+            {"schema": result.schema_drift_json, "coverage": result.coverage_drift_json}
+            if result.schema_drift_json is not None else None
+        ),
     )
 
     ai_insights = provider.generate_insights_from_context(context)
+    if getattr(provider, "model_note", None):
+        ai_insights["model_note"] = provider.model_note
     if not ai_insights.get("enabled"):
         return ai_insights, generate_ai_insights_markdown(ai_insights)
 

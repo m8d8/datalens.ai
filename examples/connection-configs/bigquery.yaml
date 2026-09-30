@@ -1,0 +1,43 @@
+# Google BigQuery dataset
+# Use for: warehouse tables, views and ad-hoc queries (read-only)
+# Needs the optional extra:  pip install 'datalens-ai[bigquery]'   (or: uv sync --extra bigquery)
+#
+# Credentials (first match wins):
+#   1. params.credentials_file (service-account JSON)
+#   2. secrets.yaml → bigquery.credentials_file
+#   3. Application Default Credentials: `gcloud auth application-default login`
+#      or GOOGLE_APPLICATION_CREDENTIALS=/path/key.json
+# Least privilege: roles/bigquery.dataViewer on the dataset + roles/bigquery.jobUser on the project.
+
+name: bigquery_sales
+source_type: bigquery
+description: "Sales warehouse (BigQuery)"
+
+params:
+  project: "${GCP_PROJECT}"          # default: the credentials' project
+  dataset: "sales"
+  location: "EU"                     # optional: EU, US, us-central1, …
+  tables: "orders,customers"         # optional: default = every table and view in the dataset
+
+  # Optional: filtered tables and queries as their own objects
+  # objects:
+  #   - "orders|order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY) -> orders_yesterday"
+  #   - "query:SELECT o.*, c.tier FROM sales.orders o JOIN sales.customers c USING (customer_id) -> orders_enriched"
+
+  # Cost guard: every job is capped (bytes billed). 0 disables the cap.
+  max_bytes_billed: 10737418240      # 10 GiB
+
+profiling:
+  sample_size: 20000                 # sampled with TABLESAMPLE SYSTEM, billed only for sampled blocks
+
+drift:
+  compare_to: rolling
+
+metadata:
+  created: "2026-09-30"
+  tags: ["bigquery", "warehouse"]
+
+# Usage:
+# datalens analyze --cc bigquery_sales --detect-drift
+# or without a config:
+# datalens analyze --source bigquery --project my-proj --dataset sales --tables orders,customers

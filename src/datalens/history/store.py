@@ -28,13 +28,30 @@ class HistoryStore:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-    def save(self, version_tag: str, schema_json: dict[str, Any]) -> Path:
+    def save(
+        self,
+        version_tag: str,
+        schema_json: dict[str, Any],
+        *,
+        metrics: dict[str, float] | None = None,
+        categories: dict[str, list[str]] | None = None,
+        breached: list[str] | None = None,
+        run_date: str | None = None,
+        summary: dict[str, Any] | None = None,
+    ) -> Path:
         """
         Save a schema analysis run.
 
         Args:
             version_tag: Version identifier for this run.
-            schema_json: The schema analysis JSON.
+            schema_json: The schema analysis JSON (already PII-masked).
+            metrics: Flat run metrics (``datalens.drift.extract_metrics``) — the
+                series the rolling baseline learns from.
+            breached: Metric keys that breached in this run; excluded from future
+                rolling baselines so a bad day doesn't become "normal".
+            run_date: Logical date of the data (``--run-date``); defaults to now.
+                Runs are ordered by it, so back-filled days land in the right place.
+            summary: Small run summary (scores, drift status) for ``history list``.
 
         Returns:
             Path to the saved file.
@@ -51,10 +68,19 @@ class HistoryStore:
         )
 
         # Save metadata
+        if metrics is not None:
+            (version_dir / "metrics.json").write_text(
+                json.dumps({"metrics": metrics, "categories": categories or {}, "breached": breached or []},
+                           indent=1),
+                encoding="utf-8",
+            )
+
         metadata = {
             "version_tag": version_tag,
             "timestamp": datetime.now().isoformat(),
+            "run_date": run_date or datetime.now().isoformat(),
             "objects": [obj.get("object") for obj in schema_json.get("objects", [])],
+            "summary": summary or {},
         }
         metadata_file = version_dir / "metadata.json"
         metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -98,8 +124,9 @@ class HistoryStore:
                 except Exception:
                     pass
 
-        # Sort by timestamp, newest first
-        versions.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        # Newest first, by the data's logical run date (falls back to save time).
+        versions.sort(key=lambda x: (x.get("run_date") or x.get("timestamp", ""), x.get("timestamp", "")),
+                      reverse=True)
         return versions
 
     def get_latest(self) -> dict[str, Any] | None:
@@ -114,6 +141,43 @@ class HistoryStore:
             return None
 
         return self.load(versions[0]["version_tag"])
+
+    def load_runs(self, *, exclude: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        """
+        Earlier runs, newest first:
+        ``{"tag", "timestamp", "run_date", "metrics", "categories", "breached", "summary"}``.
+
+        Runs saved before metrics.json existed get their metrics derived from
+        the stored schema (schema-level metrics only).
+        """
+        from datalens.drift.metrics import extract_categories, extract_metrics
+
+        runs: list[dict[str, Any]] = []
+        for meta in self.list_versions():
+            tag = meta.get("version_tag", "")
+            if not tag or tag == exclude:
+                continue
+            metrics_file = self.base_dir / tag / "metrics.json"
+            if metrics_file.exists():
+                data = json.loads(metrics_file.read_text(encoding="utf-8"))
+                metrics, breached = data.get("metrics", {}), data.get("breached", [])
+                categories = data.get("categories", {})
+            else:
+                schema = self.load(tag)
+                metrics, breached = (extract_metrics(schema) if schema else {}), []
+                categories = extract_categories(schema) if schema else {}
+            runs.append({
+                "tag": tag,
+                "timestamp": meta.get("timestamp"),
+                "run_date": meta.get("run_date") or meta.get("timestamp"),
+                "metrics": metrics,
+                "categories": categories,
+                "breached": breached,
+                "summary": meta.get("summary", {}),
+            })
+            if limit and len(runs) >= limit:
+                break
+        return runs
 
     def delete(self, version_tag: str) -> bool:
         """

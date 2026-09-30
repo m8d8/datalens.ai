@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "deliveries",
+  "type": "object",
+  "required": [
+    "delivery_id",
+    "match_id",
+    "innings",
+    "over",
+    "ball",
+    "batter_id",
+    "bowler_id",
+    "non_striker_id",
+    "runs"
+  ],
+  "x-datalens": {
+    "defaults": {
+      "coverage": {
+        "change_pct": 20
+      }
+    }
+  },
+  "properties": {
+    "delivery_id": {
+      "type": "string",
+      "pattern": "^[0-9]+-[1-6]-[0-9]{1,2}-[0-9]{1,2}$"
+    },
+    "match_id": {
+      "type": "string",
+      "x-datalens": {
+        "coverage": {
+          "drop_pct": 5
+        }
+      }
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "innings": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 6
+    },
+    "over": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 19
+    },
+    "ball": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "batting_team_id": {
+      "type": "string"
+    },
+    "batter_id": {
+      "type": "string"
+    },
+    "bowler_id": {
+      "type": "string"
+    },
+    "non_striker_id": {
+      "type": "string",
+      "x-datalens": {
+        "coverage": {
+          "drop_pts": {
+            "warn": 2,
+            "fail": 10
+          }
+        }
+      }
+    },
+    "runs": {
+      "type": "object",
+      "required": [
+        "batter",
+        "extras",
+        "total"
+      ],
+      "properties": {
+        "batter": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6
+        },
+        "extras": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "extras": {
+      "type": "object"
+    },
+    "wickets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "bowled",
+              "caught",
+              "caught and bowled",
+              "hit wicket",
+              "lbw",
+              "obstructing the field",
+              "retired hurt",
+              "retired out",
+              "run out",
+              "stumped"
+            ]
+          },
+          "player_out_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

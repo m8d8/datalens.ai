@@ -1,0 +1,88 @@
+{
+  "source": {
+    "ipl_json": "https://cricsheet.org/downloads/ipl_json.zip",
+    "register": "https://cricsheet.org/register/people.csv",
+    "license": "ODC-BY 1.0"
+  },
+  "from_season": 2017,
+  "seed": 42,
+  "day1_cutoff": "2026-05-29",
+  "day2_added_date": "2026-05-31",
+  "day2_added_match_ids": [
+    "1535465"
+  ],
+  "injected_changes": [
+    {
+      "kind": "rename",
+      "change": "deliveries.runs.extras -> deliveries.runs.extra_runs",
+      "expected_detection": "schema drift: field removed + added"
+    },
+    {
+      "kind": "type",
+      "change": "deliveries.over int -> string in 5% of rows",
+      "expected_detection": "type drift"
+    },
+    {
+      "kind": "add_field",
+      "change": "deliveries.ball_speed_kph (~90% null)",
+      "expected_detection": "added field, low completeness"
+    },
+    {
+      "kind": "drop_field",
+      "change": "matches.toss.decision removed",
+      "expected_detection": "removed nested field"
+    },
+    {
+      "kind": "nulls",
+      "change": "deliveries.non_striker_id null in 30% of rows",
+      "expected_detection": "null-rate / coverage drift"
+    },
+    {
+      "kind": "distribution",
+      "change": "deliveries.runs.batter: 20% of dot/single balls become 4/6",
+      "expected_detection": "distribution drift"
+    },
+    {
+      "kind": "category",
+      "change": "new wicket kind 'timed out' + new venue 'Demo Park, Pune'",
+      "expected_detection": "new category values"
+    },
+    {
+      "kind": "volume",
+      "change": "40% of deliveries rows dropped (truncated feed)",
+      "expected_detection": "row-count drift"
+    },
+    {
+      "kind": "pii",
+      "change": "players.contact_email (synthetic, neutral-ish name)",
+      "expected_detection": "PII detection + masking"
+    },
+    {
+      "kind": "orphans",
+      "change": "2% of deliveries.bowler_id point to unknown players",
+      "expected_detection": "referential-integrity drift"
+    }
+  ],
+  "daily_feed": {
+    "days": [
+      "2026-05-16",
+      "2026-05-17",
+      "2026-05-18",
+      "2026-05-19",
+      "2026-05-20",
+      "2026-05-21",
+      "2026-05-22",
+      "2026-05-23",
+      "2026-05-24",
+      "2026-05-26",
+      "2026-05-27",
+      "2026-05-29",
+      "2026-05-31"
+    ],
+    "broken_day": "2026-05-31",
+    "broken_day_changes": [
+      "deliveries truncated to ~1/8 of the day's rows",
+      "deliveries.non_striker_id null in ~30% of rows"
+    ]
+  }
+}

@@ -25,6 +25,13 @@ class CopilotLoginProvider(AIProvider):
         copilot_cfg = config.secrets.get("copilot", {})
         self._gh_path = copilot_cfg.get("gh_path") or find_executable("gh")
         self._timeout = int(copilot_cfg.get("timeout", 180))
+        requested = self.resolve_model(copilot_cfg.get("model"), "DATALENS_COPILOT_MODEL")
+        if requested:
+            self.note_model_fallback(requested, "gh copilot does not accept a model option")
+
+    @property
+    def display_model(self) -> str:
+        return "auto"
 
     @property
     def name(self) -> str:
@@ -41,6 +48,16 @@ class CopilotLoginProvider(AIProvider):
         if not ok:
             return False
         return cli_status_ok([self._gh_path, "copilot", "status"], timeout=15)
+
+    def complete(self, prompt: str, *, system: str | None = None, max_tokens: int = 2048) -> tuple[bool, str]:
+        import tempfile
+
+        if not self.is_available():
+            return False, "Copilot CLI not available"
+        text = f"{system}\n\n{prompt}" if system else prompt
+        with tempfile.TemporaryDirectory(prefix="datalens-chat-") as sandbox:
+            ok, stdout, stderr = run_cli_prompt([self._gh_path, "copilot", "-p", text], timeout=self._timeout, cwd=sandbox)
+        return (True, stdout) if ok else (False, stderr or "Copilot CLI failed")
 
     def generate_insights(
         self,
@@ -72,6 +89,7 @@ class CopilotLoginProvider(AIProvider):
         return normalize_insights_payload(
             parsed,
             provider=self.name,
+            model=self.display_model,
             auth_mode=self.auth_mode,
             raw_response=stdout,
         )

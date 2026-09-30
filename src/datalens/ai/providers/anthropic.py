@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from datalens.ai.base import AIProvider
+from datalens.ai.base import AIProvider, is_model_error
 from datalens.ai.context import build_analysis_context
 from datalens.ai.prompt import build_insights_prompt
 from datalens.ai.response import extract_json_from_text, normalize_insights_payload
@@ -30,10 +30,40 @@ class AnthropicProvider(AIProvider):
         self._client = None
         anthropic_cfg = config.secrets.get("anthropic", {})
         self._api_key = os.environ.get("ANTHROPIC_API_KEY") or anthropic_cfg.get("api_key")
-        self._model = (
-            anthropic_cfg.get("model")
-            or os.environ.get("DATALENS_ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-        )
+        self._requested_model = self.resolve_model(anthropic_cfg.get("model"), "DATALENS_ANTHROPIC_MODEL")
+        self._auto_model: str | None = None
+
+    AUTO_FALLBACK_MODEL = "claude-sonnet-5-5"
+
+    @property
+    def _model(self) -> str:
+        return self._requested_model or self._pick_auto_model()
+
+    @property
+    def display_model(self) -> str:
+        return self._requested_model or f"auto ({self._pick_auto_model()})"
+
+    def _pick_auto_model(self) -> str:
+        """Auto: the newest Sonnet the account can use (models are listed newest first)."""
+        if self._auto_model is None:
+            self._auto_model = self.AUTO_FALLBACK_MODEL
+            try:
+                ids = [m.id for m in self._get_client().models.list(limit=50).data]
+                self._auto_model = next((i for i in ids if "sonnet" in i), ids[0] if ids else self.AUTO_FALLBACK_MODEL)
+            except Exception:
+                pass
+        return self._auto_model
+
+    def _create(self, **kwargs: Any) -> Any:
+        """messages.create with the resolved model; a rejected configured model falls back to auto once."""
+        try:
+            return self._get_client().messages.create(model=self._model, **kwargs)
+        except Exception as e:
+            if self._requested_model and is_model_error(str(e)):
+                self.note_model_fallback(self._requested_model, str(e))
+                self._requested_model = None
+                return self._get_client().messages.create(model=self._model, **kwargs)
+            raise
 
     @property
     def name(self) -> str:
@@ -58,6 +88,19 @@ class AnthropicProvider(AIProvider):
             self._client = anthropic.Anthropic(api_key=self._api_key)
         return self._client
 
+    def complete(self, prompt: str, *, system: str | None = None, max_tokens: int = 2048) -> tuple[bool, str]:
+        if not self.is_available():
+            return False, "Anthropic API not available (set ANTHROPIC_API_KEY and install the 'ai' extra)"
+        try:
+            kwargs: dict[str, Any] = {"max_tokens": max_tokens,
+                                      "messages": [{"role": "user", "content": prompt}]}
+            if system:
+                kwargs["system"] = system
+            message = self._create(**kwargs)
+            return True, "".join(getattr(block, "text", "") for block in message.content)
+        except Exception as e:
+            return False, str(e)
+
     def generate_insights(
         self,
         schema_json: dict[str, Any],
@@ -76,18 +119,13 @@ class AnthropicProvider(AIProvider):
         prompt = build_insights_prompt(ctx)
 
         try:
-            client = self._get_client()
-            message = client.messages.create(
-                model=self._model,
-                max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = message.content[0].text
+            message = self._create(max_tokens=4096, messages=[{"role": "user", "content": prompt}])
+            text = "".join(getattr(block, "text", "") for block in message.content)
             parsed = extract_json_from_text(text)
             return normalize_insights_payload(
                 parsed,
                 provider=self.name,
-                model=self._model,
+                model=self.display_model,
                 auth_mode=self.auth_mode,
                 raw_response=text,
             )

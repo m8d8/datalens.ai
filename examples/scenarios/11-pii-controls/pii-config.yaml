@@ -1,0 +1,7 @@
+# App config (-c): PII controls. Patterns are "object.path" with wildcards.
+mask_pii: true
+pii_ignore:
+  - "teams.name"        # franchise names, not people
+  - "venues.*"
+pii_force:
+  "players.unique_name": name

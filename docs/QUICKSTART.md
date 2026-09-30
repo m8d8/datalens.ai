@@ -81,9 +81,17 @@ datalens analyze --source file --path data.csv --out-dir output --detect-drift
 
 The **Trends & Drift** tab now shows added/removed fields, type changes, and coverage shifts, and the health verdict factors the drift in.
 
-> `--detect-drift` compares against your **most recent previous run** (rolling). To always compare against a **fixed baseline**, use `--compare-to baseline` instead. See [Usage → How drift comparison works](USAGE.md#how-drift-comparison-works-rolling-vs-baseline).
+> `--detect-drift` compares with your **previous run**. Use `--compare-to baseline` for a **fixed baseline**, or
+> `--compare-to rolling` to compare with a **normal range learned from recent runs** (quiet on normal day-to-day
+> variation, loud on real breaks). See [Usage → Drift & history](USAGE.md#drift--history).
 
----
+## 6. Know what to do next
+
+- **Verdict → Action Plan** lists every finding as an action with evidence and a copy-ready fix.
+- **Verdict → How scores work** (or hover any ⓘ) explains every number.
+- Expected a certain schema? `datalens schema infer … -o expected.json`, edit, then `--schema expected.json`.
+- Gate a pipeline: add `--fail-on fail --min-score health=70`; exit code 2 means "stop".
+- Questions? `datalens serve <run-dir> --ai claude` to chat with the run.
 
 ## Next steps
 

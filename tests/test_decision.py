@@ -255,7 +255,7 @@ def test_build_decision_layer_shape():
     layer = decision.build_decision_layer(result, None)
     assert set(layer) == {
         "drift_severity", "health_verdict", "compliance_scorecard",
-        "fitness_for_use", "action_plan", "top_actions", "functional_dependencies",
+        "fitness_for_use", "action_plan", "top_actions", "functional_dependencies", "next_steps",
     }
     assert "users" in layer["fitness_for_use"]
     assert len(layer["top_actions"]) <= 3

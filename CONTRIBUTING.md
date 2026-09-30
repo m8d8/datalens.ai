@@ -6,8 +6,8 @@ Thank you for your interest in contributing to Datalens!
 
 ```bash
 # Clone the repository
-git clone https://github.com/datalens-ai/datalens.git
-cd datalens
+git clone https://github.com/m8d8/datalens.ai.git
+cd datalens.ai
 
 # Install with dev dependencies using uv
 uv sync --extra dev

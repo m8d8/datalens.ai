@@ -27,8 +27,10 @@ import gzip
 import io
 import json
 import logging
+import random
 import xml.etree.ElementTree as ET
 import zipfile
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
@@ -290,6 +292,33 @@ class FileConnector(Connector):
         if sample_size is None:
             sample_size = self.config.sample_size
 
+        strategy = (getattr(self.config, "sample_strategy", "head") or "head").lower()
+        if sample_size and strategy == "head":
+            yield from self._read_records(obj, sample_size, max_depth)
+            return
+
+        # Full scan, or reservoir/tail sampling: stream every record once. Seeing
+        # the whole file also gives the true row count for volume drift.
+        records = self._read_records(obj, 0, max_depth)
+        if not sample_size:
+            total = 0
+            for record in records:
+                total += 1
+                yield record
+            obj.metadata["total_rows"] = total
+            return
+
+        if strategy == "tail":
+            picked, total = self._tail(records, sample_size)
+        else:
+            picked, total = self._reservoir(records, sample_size, self.config.sample_seed)
+        obj.metadata["total_rows"] = total
+        yield from picked
+
+    def _read_records(
+        self, obj: ObjectRef, sample_size: int, max_depth: int | None
+    ) -> Iterator[Record]:
+        """Dispatch to the format-specific reader (sample_size=0 reads everything)."""
         if self._file_type == ".csv":
             yield from self._sample_csv(sample_size)
         elif self._file_type == ".json":
@@ -300,6 +329,33 @@ class FileConnector(Connector):
             yield from self._sample_xml(sample_size)
         elif self._file_type in {".xlsx", ".xls"}:
             yield from self._sample_excel(obj, sample_size)
+
+    @staticmethod
+    def _reservoir(records: Iterator[Record], k: int, seed: int) -> tuple[list[Record], int]:
+        """Uniform random sample of k records in one pass (Algorithm R); keeps file order."""
+        rng = random.Random(seed)
+        picked: list[tuple[int, Record]] = []
+        total = 0
+        for i, record in enumerate(records):
+            total += 1
+            if i < k:
+                picked.append((i, record))
+            else:
+                j = rng.randint(0, i)
+                if j < k:
+                    picked[j] = (i, record)
+        picked.sort(key=lambda item: item[0])
+        return [record for _, record in picked], total
+
+    @staticmethod
+    def _tail(records: Iterator[Record], k: int) -> tuple[list[Record], int]:
+        """Last k records (newest rows of an append-only feed)."""
+        window: deque[Record] = deque(maxlen=k)
+        total = 0
+        for record in records:
+            total += 1
+            window.append(record)
+        return list(window), total
 
     def _sample_csv(self, sample_size: int) -> Iterator[Record]:
         """Sample records from CSV file."""
@@ -469,9 +525,8 @@ class FileConnector(Connector):
         wb.close()
 
     def count(self, obj: ObjectRef) -> int | None:
-        """Return approximate count (may be expensive for large files)."""
-        # For files, counting can be expensive; return None to indicate unknown
-        return None
+        """Row count, known once the file has been fully streamed (full scan / reservoir / tail)."""
+        return (obj.metadata or {}).get("total_rows")
 
     def close(self) -> None:
         """Clean up resources."""

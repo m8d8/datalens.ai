@@ -12,10 +12,13 @@ Detects common PII patterns:
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from datalens.profiling.naming import name_tokens
 
 
 class PIIType(str, Enum):
@@ -41,6 +44,8 @@ class PIIDetection:
     confidence: float  # 0.0 to 1.0
     field_path: str
     sample_masked: str | None = None
+    method: str = "name"
+    """What triggered the detection: "name", "value", "name+value" or "config"."""
 
 
 # Regex patterns for PII detection
@@ -60,32 +65,39 @@ _PATTERNS = {
     PIIType.PASSPORT: re.compile(r"^[A-Z]{1,2}\d{6,9}$"),
 }
 
-# Field name patterns that suggest PII
-_NAME_PATTERNS = {
-    PIIType.EMAIL: re.compile(r"(email|e[-_]?mail)", re.IGNORECASE),
-    PIIType.PHONE: re.compile(
-        r"(phone|mobile|cell|tel|telephone|fax)", re.IGNORECASE
-    ),
-    PIIType.SSN: re.compile(r"(ssn|social[-_]?security|tax[-_]?id)", re.IGNORECASE),
-    PIIType.CREDIT_CARD: re.compile(
-        r"(card[-_]?num|credit[-_]?card|cc[-_]?num|pan)", re.IGNORECASE
-    ),
-    PIIType.IP_ADDRESS: re.compile(r"(ip[-_]?addr|ip[-_]?address|client[-_]?ip)", re.IGNORECASE),
-    PIIType.NAME: re.compile(
-        r"(^name$|first[-_]?name|last[-_]?name|full[-_]?name|"
-        r"user[-_]?name|author|customer[-_]?name)", re.IGNORECASE
-    ),
-    PIIType.ADDRESS: re.compile(
-        r"(address|street|city|zip|postal|state|country)", re.IGNORECASE
-    ),
-    PIIType.DATE_OF_BIRTH: re.compile(
-        r"(dob|birth[-_]?date|date[-_]?of[-_]?birth|birthday)", re.IGNORECASE
-    ),
-    PIIType.PASSPORT: re.compile(r"(passport)", re.IGNORECASE),
-    PIIType.DRIVER_LICENSE: re.compile(
-        r"(driver[-_]?lic|license[-_]?num|dl[-_]?num)", re.IGNORECASE
-    ),
+# Field-name hints, matched against whole *tokens* of the field name (snake_case,
+# camelCase and kebab-case are split, and adjacent tokens are also joined, so
+# "first_name" / "firstName" give "firstname"). Token matching avoids substring
+# false positives like "pan" in "company", "tel" in "hotel", "state" in "statement".
+#
+# Each hint carries the confidence a name alone deserves. Names that clearly
+# describe a person's data (email, ssn, first_name…) are strong; generic words
+# that often label non-person entities ("name" of a team, "author" of a record)
+# are weak and only reported as *possible* PII. Location words on their own
+# (city, state, country) are not PII and are not flagged.
+_NAME_HINTS: dict[PIIType, tuple[set[str], float]] = {
+    PIIType.EMAIL: ({"email", "emailaddress", "emailid", "mail"}, 0.8),
+    PIIType.PHONE: ({"phone", "phonenumber", "mobile", "telephone", "tel", "cell", "cellphone", "fax", "msisdn"}, 0.75),
+    PIIType.SSN: ({"ssn", "socialsecurity", "socialsecuritynumber", "taxid", "nationalid", "nino"}, 0.85),
+    PIIType.CREDIT_CARD: ({"cardnumber", "cardnum", "creditcard", "ccnum", "ccnumber", "pan"}, 0.8),
+    PIIType.IP_ADDRESS: ({"ip", "ipaddr", "ipaddress", "clientip", "remoteip"}, 0.6),
+    PIIType.NAME: ({"firstname", "lastname", "fullname", "surname", "givenname", "familyname",
+                    "middlename", "customername", "username", "displayname"}, 0.75),
+    PIIType.ADDRESS: ({"address", "streetaddress", "street", "addressline", "zip", "zipcode",
+                       "postal", "postalcode", "postcode"}, 0.6),
+    PIIType.DATE_OF_BIRTH: ({"dob", "birthdate", "dateofbirth", "birthday"}, 0.8),
+    PIIType.PASSPORT: ({"passport", "passportnumber", "passportno"}, 0.85),
+    PIIType.DRIVER_LICENSE: ({"driverlicense", "driverslicense", "licensenumber", "dlnum", "dlnumber"}, 0.85),
 }
+
+# Generic words that *may* hold a person's name, reported at low confidence.
+_WEAK_NAME_HINTS: dict[str, float] = {"name": 0.4, "author": 0.45, "owner": 0.4, "contact": 0.4}
+
+# Share of observed values that must match a value pattern before it counts.
+MIN_VALUE_MATCH_RATIO = 0.3
+
+# Detections at or above this confidence are "high risk" (and masked in reports).
+HIGH_RISK_CONFIDENCE = 0.8
 
 
 def detect_pii_in_field(
@@ -99,67 +111,74 @@ def detect_pii_in_field(
     Args:
         field_path: Dot-notation path to the field.
         field_type: Inferred type of the field.
-        examples: Sample values from the field.
+        examples: Observed values from the field (examples and/or top values).
 
     Returns:
-        List of PII detections with confidence scores.
+        List of PII detections with confidence scores. Each detection's
+        ``method`` says what triggered it: "name", "value" or "name+value".
     """
     detections: list[PIIDetection] = []
     field_name = field_path.split(".")[-1].replace("[]", "")
+    tokens = name_tokens(field_name)
 
-    # Check field name patterns
-    for pii_type, pattern in _NAME_PATTERNS.items():
-        if pattern.search(field_name):
-            confidence = 0.7  # Base confidence from field name
-            detections.append(
-                PIIDetection(
-                    pii_type=pii_type,
-                    confidence=confidence,
-                    field_path=field_path,
-                )
-            )
+    for pii_type, (hints, confidence) in _NAME_HINTS.items():
+        if tokens & hints:
+            detections.append(PIIDetection(pii_type, confidence, field_path, method="name"))
 
-    # Check value patterns for string types
-    if field_type in ("string", "email", "phone") and examples:
+    # Value patterns (string-like fields only)
+    values = [v for v in examples if isinstance(v, str)]
+    if field_type in ("string", "email", "phone") and values:
         for pii_type, pattern in _PATTERNS.items():
-            matches = sum(
-                1
-                for ex in examples
-                if isinstance(ex, str) and pattern.match(ex)
-            )
-            if matches > 0:
-                confidence = min(0.95, 0.5 + (matches / len(examples)) * 0.45)
+            matches = sum(1 for v in values if pattern.match(v))
+            ratio = matches / len(values)
+            if not matches or ratio < MIN_VALUE_MATCH_RATIO:
+                continue
+            confidence = min(0.95, 0.5 + ratio * 0.45)
+            existing = next((d for d in detections if d.pii_type == pii_type), None)
+            if existing:
+                existing.confidence = min(0.99, max(existing.confidence, confidence) + 0.05)
+                existing.method = "name+value"
+            else:
+                detections.append(PIIDetection(pii_type, confidence, field_path, method="value"))
 
-                # Check if we already have this detection from field name
-                existing = next(
-                    (d for d in detections if d.pii_type == pii_type),
-                    None,
-                )
-                if existing:
-                    existing.confidence = max(existing.confidence, confidence)
-                else:
-                    detections.append(
-                        PIIDetection(
-                            pii_type=pii_type,
-                            confidence=confidence,
-                            field_path=field_path,
-                        )
-                    )
+    # Generic words ("name", "contact") only count when nothing more specific matched.
+    if not detections:
+        weak = max((c for word, c in _WEAK_NAME_HINTS.items() if word in tokens), default=0.0)
+        if weak:
+            detections.append(PIIDetection(PIIType.NAME, weak, field_path, method="name"))
 
     return detections
 
 
-def detect_pii_in_schema(schema_json: dict[str, Any]) -> dict[str, list[PIIDetection]]:
+def _matches_any(obj_name: str, path: str, patterns: list[str] | dict[str, Any]) -> str | None:
+    """Return the first pattern matching "object.path" (fnmatch wildcards), if any."""
+    target = f"{obj_name}.{path}"
+    for pattern in patterns:
+        if fnmatch.fnmatchcase(target, pattern) or fnmatch.fnmatchcase(path, pattern):
+            return pattern
+    return None
+
+
+def detect_pii_in_schema(
+    schema_json: dict[str, Any],
+    *,
+    ignore: list[str] | None = None,
+    force: dict[str, str] | None = None,
+) -> dict[str, list[PIIDetection]]:
     """
     Scan entire schema for PII fields.
 
     Args:
         schema_json: Schema analysis JSON from profiling.
+        ignore: "object.path" patterns never treated as PII (config ``pii_ignore``).
+        force: "object.path" pattern → PII type, always treated as PII (config ``pii_force``).
 
     Returns:
         Dict mapping object names to lists of PII detections.
     """
     results: dict[str, list[PIIDetection]] = {}
+    ignore = ignore or []
+    force = force or {}
 
     for obj in schema_json.get("objects", []):
         obj_name = obj.get("object", "unknown")
@@ -167,14 +186,24 @@ def detect_pii_in_schema(schema_json: dict[str, Any]) -> dict[str, list[PIIDetec
 
         for field in obj.get("fields", []):
             path = field.get("path", "")
+            if _matches_any(obj_name, path, ignore):
+                continue
+            forced = _matches_any(obj_name, path, force)
+            if forced:
+                try:
+                    pii_type = PIIType(force[forced])
+                except ValueError:
+                    pii_type = PIIType.NAME
+                obj_detections.append(PIIDetection(pii_type, 1.0, path, method="config"))
+                continue
+
             types = field.get("types", {})
-            examples = field.get("examples", [])
+            non_null = {t: c for t, c in types.items() if t != "null"} or types
+            primary_type = max(non_null, key=non_null.get) if non_null else "string"
+            values = list(field.get("examples", []))
+            values += [v for v in (field.get("value_counts") or {}) if v not in values]
 
-            # Get primary type
-            primary_type = max(types, key=types.get) if types else "string"
-
-            field_detections = detect_pii_in_field(path, primary_type, examples)
-            obj_detections.extend(field_detections)
+            obj_detections.extend(detect_pii_in_field(path, primary_type, values))
 
         if obj_detections:
             results[obj_name] = obj_detections
@@ -264,6 +293,7 @@ def get_pii_summary(detections: dict[str, list[PIIDetection]]) -> dict[str, Any]
     total_fields = 0
     by_type: dict[str, int] = {}
     high_risk: list[dict[str, Any]] = []
+    fields: list[dict[str, Any]] = []
 
     for obj_name, obj_detections in detections.items():
         for detection in obj_detections:
@@ -271,16 +301,21 @@ def get_pii_summary(detections: dict[str, list[PIIDetection]]) -> dict[str, Any]
             pii_type = detection.pii_type.value
             by_type[pii_type] = by_type.get(pii_type, 0) + 1
 
-            if detection.confidence >= 0.8:
-                high_risk.append({
-                    "object": obj_name,
-                    "field": detection.field_path,
-                    "type": pii_type,
-                    "confidence": detection.confidence,
-                })
+            entry = {
+                "object": obj_name,
+                "field": detection.field_path,
+                "type": pii_type,
+                "confidence": round(detection.confidence, 2),
+                "method": getattr(detection, "method", "name"),
+                "high_risk": detection.confidence >= HIGH_RISK_CONFIDENCE,
+            }
+            fields.append(entry)
+            if entry["high_risk"]:
+                high_risk.append(entry)
 
     return {
         "total_pii_fields": total_fields,
+        "fields": fields,
         "by_type": by_type,
         "high_risk_fields": sorted(
             high_risk, key=lambda x: x["confidence"], reverse=True

@@ -45,7 +45,6 @@ PII_SENSITIVITY = {
     "email": 2, "phone": 2, "ip_address": 2, "address": 2,
     "name": 1,
 }
-_MUST_MASK_CATEGORIES = {c for c, w in PII_SENSITIVITY.items() if w >= 3}
 
 # Exposure scoring (ratio-based): a dataset whose fields are *entirely* made of
 # average-sensitivity (=2) PII scores 100. exposure = min(100, density * SCALE)
@@ -97,15 +96,27 @@ def _count_multi_type_fields(schema_json: dict[str, Any]) -> int:
 
 # ─── Drift severity ──────────────────────────────────────────────────────────
 
-def drift_severity(diff: Any | None) -> str:
+def drift_severity(diff: Any | None, drift_report: dict[str, Any] | None = None) -> str:
     """
-    Map a ``history.diff.SchemaDiff`` to ``none|low|medium|high``.
+    Map drift to ``none|low|medium|high``.
+
+    With a drift report (``datalens.drift``): any "fail" finding → high, any
+    "warn" → medium, only "info" findings → low. Otherwise the legacy
+    ``history.diff.SchemaDiff`` mapping below applies.
 
     high   — breaking: removed objects/fields, type changes, or a large coverage drop.
     medium — notable: meaningful coverage/cardinality movement.
     low    — additive only (new objects/fields).
     none   — no diff or no drift.
     """
+    if drift_report is not None:
+        summary = drift_report.get("summary", {})
+        if summary.get("fail"):
+            return "high"
+        if summary.get("warn"):
+            return "medium"
+        return "low" if summary.get("info") else "none"
+
     if diff is None or not getattr(diff, "has_drift", False):
         return "none"
 
@@ -149,6 +160,8 @@ def health_verdict(
     quality: dict[str, Any] | None,
     pii_summary: dict[str, Any] | None,
     diff: Any | None = None,
+    drift_report: dict[str, Any] | None = None,
+    contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Composite 0–100 health score + status + the drivers that set it.
@@ -174,11 +187,30 @@ def health_verdict(
         drivers.append(f"{high_pii} high-risk PII field(s) detected (−{pen:.0f}).")
 
     # Drift penalty.
-    sev = drift_severity(diff)
+    sev = drift_severity(diff, drift_report)
     drift_pen = {"none": 0.0, "low": 3.0, "medium": 10.0, "high": 20.0}[sev]
     if drift_pen:
         score -= drift_pen
-        drivers.append(f"Schema drift since last run is {sev} (−{drift_pen:.0f}).")
+        if drift_report is not None:
+            summ = drift_report.get("summary", {})
+            drivers.append(
+                f"Drift vs {_reference_label(drift_report)} is {sev}: {summ.get('fail', 0)} breach(es), "
+                f"{summ.get('warn', 0)} warning(s) (−{drift_pen:.0f})."
+            )
+        else:
+            drivers.append(f"Schema drift since last run is {sev} (−{drift_pen:.0f}).")
+
+    # Expected-schema (BYOS) penalty: 3 per failed check, up to −15.
+    contract_pen = 0.0
+    if contract:
+        failed = (contract.get("summary") or {}).get("fail", 0)
+        if failed:
+            contract_pen = min(15.0, 3.0 * failed)
+            score -= contract_pen
+            drivers.append(
+                f"Expected schema: {failed} check(s) failed, conformance "
+                f"{contract.get('conformance_pct', 0):.0f}% (−{contract_pen:.0f})."
+            )
 
     # Type-stability penalty (up to −10).
     multi = _count_multi_type_fields(schema_json)
@@ -199,9 +231,44 @@ def health_verdict(
     # Severe drift can't be "healthy" no matter the score.
     if sev == "high" and status == "healthy":
         status = "attention"
-        drivers.append("Capped to 'needs attention' due to breaking schema changes.")
+        drivers.append("Capped to 'needs attention' due to breaking changes since the reference run.")
 
-    return {"status": status, "score": round(score, 1), "drivers": drivers}
+    return {
+        "status": status,
+        "score": round(score, 1),
+        "drivers": drivers,
+        "base_dqi": round(base, 1),
+        "penalties": {
+            "pii": round(min(15.0, 3.0 * high_pii), 1) if high_pii else 0.0,
+            "drift": drift_pen,
+            "contract": contract_pen,
+            "mixed_types": round(min(10.0, 1.5 * multi), 1) if multi else 0.0,
+        },
+    }
+
+
+def refresh_drift_driver(decision: dict[str, Any], drift_report: dict[str, Any] | None) -> None:
+    """Keep the health driver's drift counts in step with the final drift report."""
+    if not drift_report:
+        return
+    drivers = decision.get("health_verdict", {}).get("drivers", [])
+    summ = drift_report.get("summary", {})
+    for i, text in enumerate(drivers):
+        if text.startswith("Drift vs "):
+            head, _, tail = text.partition(": ")
+            penalty = tail[tail.rfind("("):] if "(" in tail else ""
+            drivers[i] = (f"{head}: {summ.get('fail', 0)} breach(es), {summ.get('warn', 0)} warning(s) "
+                          f"{penalty}").strip()
+
+
+def _reference_label(drift_report: dict[str, Any]) -> str:
+    mode = str(drift_report.get("mode", "previous"))
+    tag = (drift_report.get("reference") or {}).get("tag")
+    if mode.startswith("rolling"):
+        return "the rolling baseline"
+    if mode.startswith("baseline"):
+        return f"baseline '{tag}'" if tag else "the baseline"
+    return f"previous run '{tag}'" if tag else "the previous run"
 
 
 # ─── Compliance / PII scorecard (ratio-based) ────────────────────────────────
@@ -243,16 +310,43 @@ def compliance_scorecard(
         risk = "medium"
     else:
         risk = "high"
+    risk_reason = f"Exposure score {exposure_score:.1f} (share of sensitivity-weighted PII fields)."
 
-    must_mask = [f for f in high_risk if f.get("type") in _MUST_MASK_CATEGORIES]
+    # Common-sense floor: a single confirmed direct identifier matters no matter
+    # how many other fields the dataset has, so the ratio alone can't call it "low".
+    order = ["none", "low", "medium", "high"]
+    for f in high_risk:
+        weight = PII_SENSITIVITY.get(f.get("type", ""), 1)
+        floor = "high" if weight >= 3 else "medium" if weight >= 2 else "low"
+        if order.index(floor) > order.index(risk):
+            risk = floor
+            risk_reason = (
+                f"Raised to {floor}: `{f.get('object')}.{f.get('field')}` holds {f.get('type')} "
+                f"values (confidence {f.get('confidence', 0):.0%})."
+            )
+
+    # Every high-confidence detection must be masked before the data is shared.
+    must_mask = list(high_risk)
+    masked = {(m.get("object"), m.get("field")) for m in (pii_summary or {}).get("masked_fields", [])}
+    unmasked = [f for f in must_mask if (f.get("object"), f.get("field")) not in masked]
+
+    if not must_mask:
+        mask_status, mask_note = "pass", "No high-confidence PII detected."
+    elif not unmasked:
+        mask_status = "pass"
+        mask_note = (f"{len(must_mask)} field(s) masked in this report. The source data still "
+                     f"contains them — mask or tokenize before sharing raw extracts.")
+    else:
+        mask_status = "fail"
+        mask_note = (f"{len(unmasked)} field(s) shown unmasked: "
+                     + ", ".join(f"{f.get('object')}.{f.get('field')}" for f in unmasked[:5])
+                     + ". Re-run with --mask-pii.")
 
     checklist = [
         {
             "name": "Sensitive identifiers masked",
-            "status": "pass" if not must_mask else "fail",
-            "note": ("No high-sensitivity identifiers exposed."
-                     if not must_mask else
-                     f"Mask {len(must_mask)} field(s) (SSN/payment/passport/DOB) before sharing."),
+            "status": mask_status,
+            "note": mask_note,
         },
         {
             "name": "PII inventory documented",
@@ -280,6 +374,7 @@ def compliance_scorecard(
     return {
         "exposure_score": round(exposure_score, 1),
         "risk": risk,
+        "risk_reason": risk_reason,
         "pii_field_ratio": round(pii_field_ratio, 3),
         "avg_sensitivity": round(avg_sensitivity, 2),
         "total_pii_fields": total_pii,
@@ -295,6 +390,16 @@ def compliance_scorecard(
 
 def _high_pii_objects(pii_summary: dict[str, Any] | None) -> set[str]:
     return {f.get("object") for f in (pii_summary or {}).get("high_risk_fields", [])}
+
+
+def _object_changed(diff: Any, name: str) -> bool:
+    """True when this specific object has schema or coverage drift (not just the dataset)."""
+    if name in getattr(diff, "added_objects", []) or name in getattr(diff, "removed_objects", []):
+        return True
+    if getattr(diff, "added_fields", {}).get(name) or getattr(diff, "removed_fields", {}).get(name):
+        return True
+    changes = list(getattr(diff, "type_changes", [])) + list(getattr(diff, "coverage_changes", []))
+    return any(c.get("object") == name for c in changes)
 
 
 def fitness_for_use(
@@ -333,7 +438,7 @@ def fitness_for_use(
     if dqi < FITNESS_CLEANUP_DQI or problem_fields >= 5:
         badges.append({"label": "Needs cleanup", "status": "fail"})
 
-    if drift_severity(diff) == "high":
+    if diff is not None and _object_changed(diff, name):
         badges.append({"label": "Recently changed", "status": "warn"})
 
     return badges
@@ -443,7 +548,9 @@ def build_decision_layer(result: _ResultLike, diff: Any | None = None) -> dict[s
     joins = result.joins
     insights = result.insights
 
-    verdict = health_verdict(schema_json, quality, pii_summary, diff)
+    drift_report = getattr(result, "drift_report", None)
+    verdict = health_verdict(schema_json, quality, pii_summary, diff, drift_report,
+                             getattr(result, "contract", None))
     plan = action_plan(insights)
 
     fitness = {
@@ -451,8 +558,8 @@ def build_decision_layer(result: _ResultLike, diff: Any | None = None) -> dict[s
         for obj in (quality or {}).get("objects", [])
     }
 
-    return {
-        "drift_severity": drift_severity(diff),
+    decision = {
+        "drift_severity": drift_severity(diff, drift_report),
         "health_verdict": verdict,
         "compliance_scorecard": compliance_scorecard(pii_summary, _total_fields(schema_json)),
         "fitness_for_use": fitness,
@@ -460,3 +567,20 @@ def build_decision_layer(result: _ResultLike, diff: Any | None = None) -> dict[s
         "top_actions": plan[:3],
         "functional_dependencies": functional_dependencies(joins, schema_json),
     }
+    refresh_next_steps(result, decision)
+    return decision
+
+
+def refresh_next_steps(result: Any, decision: dict[str, Any]) -> None:
+    """(Re)build the specific next-step actions and the Top 3 from every finding of the run."""
+    from datalens.profiling.next_steps import build_next_steps
+
+    steps = build_next_steps(result, decision)
+    decision["next_steps"] = steps
+    if steps:
+        decision["top_actions"] = [
+            {"severity": a["severity"], "category": a["category"], "action": a["title"],
+             "impact_text": a.get("impact", ""), "effort": a.get("effort", "medium"), "id": a["id"],
+             "source": a["source"]}
+            for a in steps[:3]
+        ]

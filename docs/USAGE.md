@@ -1,6 +1,6 @@
 # Usage Guide
 
-Everything you can do with Datalens: every CLI flag, all source types, drift detection, configuration, secrets, AI providers, and library/CI usage.
+Everything you can do with Datalens: every CLI flag and command, all source types, drift detection and rules, expected schemas, configuration, secrets, AI and chat, and library/CI usage.
 
 - [Command structure](#command-structure)
 - [Full CLI reference](#full-cli-reference)
@@ -9,14 +9,16 @@ Everything you can do with Datalens: every CLI flag, all source types, drift det
   - [MongoDB](#mongodb)
   - [S3 / HTTP](#s3--http)
 - [Sampling & depth](#sampling--depth)
-- [Schema drift & history](#schema-drift--history)
+- [Drift & history](#drift--history) — previous run, fixed baseline, learned rolling baseline, drift rules
+- [Expected schema (BYOS)](#expected-schema-byos--bring-your-own-schema)
 - [Configuration](#configuration)
 - [Secrets](#secrets)
 - [AI providers](#ai-providers)
 - [PII masking](#pii-masking)
 - [Outputs](#outputs)
 - [Library usage](#library-usage)
-- [Using it in CI](#using-it-in-ci)
+- [CI/CD — gates, exit codes, notifications](#cicd--gates-exit-codes-notifications)
+- [Chat with a run](#chat-with-a-run)
 - [Ways to use the product](#ways-to-use-the-product)
 
 ---
@@ -80,12 +82,13 @@ For details on creating and managing connection configs, see [Connection Config 
 | Option | Description | Default |
 |---|---|---|
 | `--cc, --connection-config` | Name or path to connection config (alternative to `--source`) | — |
-| `-s, --source` | `file` \| `mongodb` \| `s3` \| `http` (required if no `--cc`) | — |
+| `-s, --source` | `file` \| `mongodb` \| `bigquery` \| `s3` \| `http` (required if no `--cc`) | — |
 | `-p, --path` | Path to file (file source) | — |
 | `--root` | Root element/path for JSON/XML | — |
 | `--sheets` | Comma-separated Excel sheet names | all sheets |
 | `--db` | Database name (MongoDB) | — |
-| `--collections` | Comma-separated collections, e.g. `users,orders` | — |
+| `--collections`, `--tables` | Comma-separated collections / tables, e.g. `users,orders` | all |
+| `--project`, `--dataset`, `--location` | BigQuery project, dataset and location | — |
 | `--object` | Object spec `"coll\|{query} -> tag"` (repeatable) | — |
 | `--uri` | Connection URI (`mongodb://`, `s3://`, `http://`) | — |
 | `--sample-size` | Records to sample per object (`0` = full scan) | `10000` |
@@ -96,14 +99,26 @@ For details on creating and managing connection configs, see [Connection Config 
 | `--secrets` | Secrets file (YAML) | — |
 | `-o, --out-dir` | Output directory | `output` |
 | `--version-tag` | Version tag for this run | timestamp |
-| `--compare-to` | Compare against a specific saved run (version tag) | — |
-| `--detect-drift` | Compare against the most recent saved run | off |
+| `--compare-to` | Drift reference: `previous` \| `rolling` \| `baseline:<tag>` \| `<tag>` | — |
+| `--detect-drift` | Compute drift vs `drift.compare_to` (default: previous run) | off |
+| `--run-date` | Logical date of the data; orders history | now |
+| `--drift-rules` | YAML file with drift rules | — |
+| `--schema` | Expected JSON Schema (`file.json` or `OBJECT=file.json`, repeatable) | — |
+| `--fail-on` | `never` \| `warn` \| `fail` — exit non-zero on drift / schema breaches | `never` |
+| `--min-score` | Score floors, e.g. `health=70,dqi=80` (exit 2 if below) | — |
+| `--max-drop` | Max score drop vs the reference, e.g. `dqi=5` | — |
+| `--notify` | `slack:<url>` \| `webhook:<url>` \| `file:<path>` (repeatable) | — |
+| `--format` | `text` \| `json` (summary to stdout) | `text` |
 | `--history-dir` | Where versioned runs are stored | `<out-dir>/.history` |
 | `--ai` | `off` \| `anthropic` \| `openai` \| `cursor` \| `copilot` \| `claude` \| `auto` | `off` |
+| `--ai-model` | Model for `--ai`; a rejected model falls back to `auto` (logged) | `auto` |
 | `--mask-pii / --no-mask-pii` | Mask detected PII in the report | on |
 | `--debug / --no-debug` | Verbose/debug output | off |
 
-> See the live, authoritative list anytime with `datalens analyze --help`.
+Other commands: `serve`, `ask` (chat), `drift`, `scores`, `history list` (CI), `schema infer|validate` (BYOS),
+`glossary` (definitions), `compare` (two datasets), `connection-list`, `info`.
+
+> See the live, authoritative list anytime with `datalens --help` and `datalens <command> --help`.
 
 ---
 
@@ -146,6 +161,28 @@ datalens analyze --source mongodb --db mydb \
 
 `--object` is repeatable, so you can profile several filtered slices in one run. All MongoDB access is **read-only**.
 
+### Google BigQuery
+
+```bash
+pip install 'datalens-ai[bigquery]'            # or: uv sync --extra bigquery
+gcloud auth application-default login          # or credentials_file: path/to/service-account.json
+
+# every table and view in a dataset
+datalens analyze --source bigquery --project my-proj --dataset sales
+# chosen tables, a filtered table and a query, each profiled as its own object
+datalens analyze --source bigquery --project my-proj --dataset sales --tables orders,customers \
+  --object "orders|order_date >= '2026-01-01' -> orders_2026" \
+  --object "query:SELECT * FROM sales.orders JOIN sales.refunds USING (order_id) -> refunds"
+```
+
+- **Read-only and cost-aware:** only single SELECT statements run (specs with `;` are rejected), labelled
+  `tool=datalens`; tables are sampled with `TABLESAMPLE SYSTEM` so only sampled blocks are billed; every job is capped
+  by `max_bytes_billed` (default 10 GiB, set in the connection config, 0 disables).
+- Row counts come from table metadata, so volume drift uses the true count. STRUCT and ARRAY columns are profiled
+  as nested fields (`ship.city`, `items[].sku`); NUMERIC → number, DATE/TIMESTAMP → ISO text.
+- Least-privilege roles: BigQuery Data Viewer on the dataset and BigQuery Job User on the project.
+- Reusable config: [`examples/connection-configs/bigquery.yaml`](../examples/connection-configs/bigquery.yaml).
+
 ### S3 / HTTP
 
 ```bash
@@ -162,77 +199,150 @@ Remote files are fetched read-only and parsed with the same file parsers.
 
 ## Sampling & depth
 
-- `--sample-size N` bounds how many records are read per object. Larger samples = more accurate cardinality/coverage, slower runs. `10000` is a good default for wide collections.
+- `--sample-size N` bounds how many records are profiled per object. For files the sample is a **uniform random
+  (reservoir) sample over the whole file** by default, so rows appended at the end — today's load — are seen, and
+  the true row count is known for volume drift. Set `sample_strategy: head` (first N, fastest) or `tail` (last N,
+  newest rows of append-only feeds) in the config; `sample_seed` keeps runs reproducible.
+- Distinct counts are **exact** (value hashes kept in memory only, up to `distinct_track_limit`, default 1M per
+  field), so keys, foreign keys and orphans work on large objects; `--max-distinct` only caps the values *shown*.
 - `--full-scan` (or `--sample-size 0`) reads everything — use for small/critical datasets.
 - `--max-depth` controls how deep nested objects/arrays are traversed.
-- `--max-distinct` caps how many distinct values are tracked per field (powers distribution charts and value-overlap detection). Raise it for richer distributions, lower it for speed/size.
+- `--max-distinct` caps how many distinct values are stored per field for display (distribution charts, category
+  drift). Raise it for richer distributions, lower it for smaller reports.
 
 ---
 
-## Schema drift & history
+## Drift & history
 
-Every run is saved (schema + metadata) under `--history-dir` (default `<out-dir>/.history`). Drift is computed purely from these saved runs — **no external store required**.
+Every run is saved under `--history-dir` (default `<out-dir>/.history`): the masked schema, a flat set of
+**metrics** (row counts, coverage, category counts, orphan rates, scores) and the values of category-like
+fields. Drift is computed from these saved runs — **no external store required**. Use the **same `--out-dir`**
+(or `--history-dir`) across runs, and keep object names stable (file names / collection names).
+
+### Three ways to compare
+
+| Flag | Compares this run with… | Answers |
+|---|---|---|
+| `--detect-drift` or `--compare-to previous` | the **previous run** | "What changed since yesterday?" |
+| `--compare-to baseline:<tag>` (or just `<tag>`) | a **fixed saved run** | "How far are we from the load we validated?" |
+| `--compare-to rolling` | a **normal range learned from recent runs** | "Is today unusual *for this feed*?" |
+
+`--detect-drift` uses `drift.compare_to` from config when set (default `previous`). Add `--run-date YYYY-MM-DD`
+so history is ordered by the data's date (back-fills land in the right place).
+
+**Previous run** reports each change once — at the run where it appears — then it becomes the new normal.
+**Fixed baseline** keeps reporting every difference from the reference. Tags in `history_protected_tags`
+(default `baseline`) are never purged by `--history-retention-days`.
+
+### The learned rolling baseline
+
+For every metric, the last N runs (default 14) define its normal range:
+
+```
+M = median(values)          MAD = median(|x − M|)          σ̂ = 1.4826 · MAD   (robust σ)
+σ̂ₑ = max(σ̂, rel_floor·|M|, sampling noise of a percentage, 1 for counts)
+band = [ min(M − k·σ̂ₑ, min seen·(1−rel_floor)),  max(M + k·σ̂ₑ, max seen·(1+rel_floor)) ]
+outside the band → warn;  also |x − M| > k·σ̂ₑ → fail                     (k = 3, rel_floor = 5%)
+```
+
+- The band always covers values seen recently, so recurring patterns (a double-header every few days, a
+  weekly spike) are learned as normal instead of alerting every time.
+- Runs that breached are left out of later baselines (`exclude_breaches`), so a bad day can't become "normal".
+- Values that appeared in any run of the window aren't reported as "new" categories.
+- **Cold start:** with fewer than `min_history` (3) earlier values the fixed rules below apply; the report says
+  how many metrics were scored each way.
+
+```yaml
+drift:
+  compare_to: rolling
+  rolling: {window: 14, min_history: 3, k: 3.0, rel_floor: 0.05, exclude_breaches: true}
+```
+
+See it in action: [`examples/scenarios/05-rolling-daily-baseline`](../examples/scenarios/05-rolling-daily-baseline/README.md).
+
+### What is compared
+
+| Area | Findings |
+|---|---|
+| Schema | objects/fields added or removed, likely **renames** (same type, coverage and values), **type changes** (types ≥ 2% of values) |
+| Volume | row count per object (true count when the whole source was read) |
+| Coverage | % of rows with a non-empty value, per field |
+| Categories | new / vanished values of category-like fields |
+| Distribution | **PSI** of categorical (top values) or numeric (percentiles) fields |
+| Integrity | orphan % of each detected foreign key |
+| Scores | health, DQI and each DQI dimension |
+
+Common-sense guards keep the report quiet on noise: changes within 3 standard errors of sampling noise are
+ignored; PSI must exceed 3× its sampling-noise floor; objects with fewer than `min_rows` (20) rows aren't judged
+on coverage/categories/distributions; identifier, foreign-key and date fields aren't judged on value mix (new
+ids every day are growth, not drift); a sparse field that's merely absent today ("~0.1 rows expected") is info.
+
+### Drift rules — thresholds per dataset, object and field
+
+Put rules in the app config (`-c`), the connection config (`drift:` section) or a file passed with
+`--drift-rules`. The most specific rule wins: **field → object → `defaults` → built-in**. Object names and field
+paths accept wildcards.
+
+```yaml
+drift:
+  compare_to: previous
+  defaults:
+    row_count: {drop_pct: {warn: 10, fail: 20}, increase_pct: {warn: 50}}
+    coverage:  {change_pct: 20}                 # 20% variance either way
+    distribution: {psi_warn: 0.1, psi_fail: 0.25}
+    categories: {new: warn, vanished: info}
+    schema: {field_removed: fail, field_added: info, type_changed: fail, field_renamed: warn}
+  objects:
+    orders:
+      row_count: {drop_pct: 10, drop_message: "Orders feed looks truncated: {old} → {new} ({delta_pct})"}
+      fields:
+        id:      {coverage: {drop_pct: 5}}      # 5% drop in the id field
+        title:   {coverage: {drop_pct: 10}}
+        country: {coverage: {change_pct: 20}}   # either way
+```
+
+- `*_pct` = change **relative** to the old value (80% → 76% is a 5% drop); `*_pts` = **absolute** change in the
+  metric's unit (80% → 76% is 4 points); `change_*` = either direction.
+- A number means breach (`fail`); `{warn: x, fail: y}` gives two levels; `min_delta` ignores tiny absolute moves.
+- Separate `drop_message` / `increase_message` templates; variables: `{object} {field} {metric} {old} {new}
+  {delta} {delta_pct} {threshold} {baseline}`.
+- The old `coverage_thresholds` / `--coverage-threshold` flags keep working for the legacy coverage-drift JSON.
+
+Full defaults: [METRICS.md → Default drift rules](METRICS.md#default-drift-rules). Re-evaluate rules on saved runs
+without touching the data: `datalens drift -o <out-dir> --run <tag> --compare-to <tag> --drift-rules new.yaml`.
+
+---
+
+## Expected schema (BYOS — bring your own schema)
+
+Declare what the data *should* look like as a JSON Schema and every run is checked against it:
 
 ```bash
-# 1) Establish a baseline
-datalens analyze --source mongodb --db mydb --collections users,orders \
-  --out-dir output/mydb --version-tag baseline
-
-# 2) Drift vs. the most recent saved run
-datalens analyze --source mongodb --db mydb --collections users,orders \
-  --out-dir output/mydb --detect-drift
-
-# Or drift vs. a specific saved run
-datalens analyze --source mongodb --db mydb --collections users,orders \
-  --out-dir output/mydb --compare-to baseline
+datalens analyze -s file -p data/ --schema expected.json               # applies to matching objects
+datalens analyze -s file -p data/ --schema orders=orders.schema.json --schema users=users.schema.json
+datalens schema infer    -s file -p data/ -o expected.json             # bootstrap from a good load, then edit
+datalens schema validate -s file -p data/ --schema expected.json       # exit 2 when a check fails
 ```
 
-**Tips**
-- Use the **same `--out-dir`** across runs so they share history.
-- Object names must be stable across runs to get field-level drift (collection names usually are; for files, keep the filename stable).
-- The **Trends & Drift** tab (last tab) shows the change log; the **Executive Summary** verdict factors drift severity in.
+Supported: `type` (incl. `["string","null"]`), `required`, nested `properties`, array `items`, `enum`/`const`,
+`minimum`/`maximum` (+ exclusive), `pattern`, `format` (date, date-time, email, uri, uuid),
+`additionalProperties: false`. One file can hold several objects under an `objects` map (what `schema infer`
+writes). In a connection config: `expected_schema: path.json`.
 
-### How drift comparison works (rolling vs. baseline)
+Thresholds go in `x-datalens` blocks — generic or per field — and become drift rules for that object:
 
-There are two comparison modes, and they answer different questions:
-
-| Flag | Compares this run to… | Mode | Best for |
-|---|---|---|---|
-| `--detect-drift` | the **most recent previous run** | **Rolling** | "What changed since I last looked?" |
-| `--compare-to <tag>` | a **specific saved run** (that version tag) | **Baseline** | "How far have we drifted from a known-good schema?" |
-
-**Order of operations (per run):** the comparison schema is loaded *before* analysis, drift is computed against it, and *then* the current run is saved to history. So a run never compares against itself, and "most recent previous run" means the chronologically last run saved in that `--history-dir`.
-
-**Rolling mode consumes changes.** Because `--detect-drift` always compares to the *immediately preceding* run, a given change is reported **once** — at the run where it first appears — and then becomes the new normal:
-
-```
-Run 1 (baseline):  field X present
-Run 2:             X removed   →  vs Run 1  →  reports "removed X"
-Run 3:             X still gone →  vs Run 2  →  reports nothing (Run 2 is now "previous")
+```json
+{"title": "orders", "type": "object", "required": ["id", "title"],
+ "x-datalens": {"defaults": {"coverage": {"change_pct": 20}}},
+ "properties": {
+   "id":      {"type": "string", "x-datalens": {"coverage": {"drop_pct": 5}}},
+   "title":   {"type": "string", "x-datalens": {"coverage": {"drop_pct": 10}, "min_coverage": 95}},
+   "country": {"type": "string", "x-datalens": {"coverage": {"change_pct": 20}}}}}
 ```
 
-This is why two unchanged back-to-back runs correctly show **no drift**, even though the schema differs from your original baseline — the difference was already reported earlier and absorbed.
-
-**Baseline mode shows cumulative drift.** If you want every difference from a fixed reference point (even ones that appeared several runs ago), pin a baseline once and always compare to it:
-
-```bash
-# pin a baseline once
-datalens analyze ... --out-dir output/mydb --version-tag baseline
-
-# every later run: cumulative drift vs. that fixed baseline
-datalens analyze ... --out-dir output/mydb --compare-to baseline
-```
-
-Every run is still saved to history regardless of mode, so the `baseline` tag remains available for `--compare-to`.
-
-**Sampling noise is suppressed.** Type-change detection ignores value-shapes that make up less than ~2% of a field's non-null values. This prevents phantom "type changes" when random sampling (e.g. MongoDB `$sample`) happens to catch a rare value-shape in one run but not another — for example, a handful of UUID-shaped values among thousands of numeric IDs will **not** be reported as drift, but a genuine shift (the shape crossing ~2%) still will.
-
-**Drift severity** rolls up to `none` / `low` / `medium` / `high`:
-- `high` — breaking changes: removed objects/fields, type changes, or a large coverage drop.
-- `medium` — notable coverage/cardinality movement.
-- `low` — additive only (new objects/fields).
-
-Severity feeds the Executive Summary health verdict (and a `high` drift caps the verdict below "Healthy").
+`x-datalens.min_coverage` (default 99) is how populated a *required* field must be. Results appear in the
+**Health → Expected Schema** tab, the Action Plan, the health score (−3 per failed check, max −15),
+`*-datalens-contract.json` and the CI gates. Example: [`examples/scenarios/07-byos-expected-schema`](../examples/scenarios/07-byos-expected-schema/README.md).
 
 ---
 
@@ -329,7 +439,7 @@ AI insights are **optional** and **off by default**. All non-AI features work wi
 | Cursor | `cursor-agent login` (license) or `CURSOR_API_KEY` | `--ai cursor` | Chosen by Cursor |
 | Auto-detect | Tries license providers first, then API keys | `--ai auto` | Provider-specific |
 
-When AI is enabled, Datalens writes `{source}-datalens-ai-insights.md` and adds an **AI Insights** tab to the HTML report.
+When AI is enabled, Datalens writes `{source}-datalens-ai-insights.md` and adds a **Verdict → AI Review** tab to the HTML report.
 
 ### Using Claude Desktop (License)
 
@@ -414,29 +524,44 @@ datalens analyze --source file --path data.csv --ai anthropic
 
 ## PII masking
 
-PII detection is always on; **masking is on by default** so sensitive values are obscured in the report (e.g. `a***@domain.com`, `***-**-1234`). Disable masking only for trusted, internal use:
+PII is detected from **values** (e.g. real email/phone/card shapes in the observed values) and from **whole-word
+field names** (`first_name`, `ssn`, `email`; `company` is not "pan", `hotel` is not "tel"). Each detection records
+how it was found: `value`, `name`, `name+value` or `config`. Generic names (`name`, `contact`, `author`) are only
+"possible" PII.
 
-```bash
-datalens analyze --source file --path data.csv --no-mask-pii
+**Masking is on by default.** High-confidence detections (≥ 80%) are masked in *every* output — HTML, schema
+JSON, history snapshots, AI prompts and the chat's SQL sample (`a***@domain.com`, `***-**-1234`); their
+ranges and percentiles are dropped too. Control it in the app config:
+
+```yaml
+mask_pii: true
+pii_ignore: ["teams.name", "venues.*"]       # never PII
+pii_force:  {"players.unique_name": name}    # always PII of this type
 ```
 
-The **PII Detection** tab and the **Compliance scorecard** summarize exposure either way.
+`--no-mask-pii` turns masking off for trusted internal use (the compliance checklist then fails
+"Sensitive identifiers masked"). A confirmed direct identifier sets a floor on the compliance risk
+(email/phone → at least medium; SSN/card/passport → high), however few fields it is.
 
 ---
 
 ## Outputs
 
-Written to `--out-dir` (named from the file stem or database name):
+Written to `<out-dir>/<source>_<tag>/`:
 
 | File | Use it for |
 |---|---|
 | `{source}-datalens-report.html` | Sharing, reviewing, decisions. Self-contained — works offline and over email. |
-| `{source}-datalens-schema.json` | Pipelines, tests, diffing, feeding other tools. |
+| `{source}-datalens-run-summary.json` | CI/CD: scores, drift status + highlights, expected-schema status, top actions. |
+| `{source}-datalens-drift-report.json` | Every drift finding with the rule/band that fired (when compared). |
+| `{source}-datalens-contract.json` | Expected-schema checks (with `--schema`). |
+| `{source}-datalens-schema.json` | Masked field statistics — pipelines, tests, diffing. |
 | `{source}-datalens-summary.md` | Pasting into PRs, tickets, or chat. |
+| `{source}-datalens-ai-insights.md` | AI review (with `--ai`). |
+| `{source}-datalens-run-manifest.json` | Source (no secrets) so `datalens serve` / `ask` can query the data. |
+| `{source}-datalens-schema-drift.json`, `-coverage-drift.json` | Legacy drift artifacts (kept for compatibility). |
 
-Where `{source}` is the identifier (file name, database name, connection config name, or API domain).
-
-History runs are stored under `<out-dir>/.history/<version-tag>/`.
+History runs are stored under `<out-dir>/.history/<version-tag>/` (`schema.json`, `metrics.json`, `metadata.json`).
 
 ---
 
@@ -471,9 +596,14 @@ result.insights             # data story, SWOT, recommendations, AI-readiness
 result.decision["health_verdict"]        # {'status','score','drivers'}
 result.decision["compliance_scorecard"]  # exposure score, risk, must-mask
 result.decision["fitness_for_use"]       # per-object readiness badges
-result.decision["action_plan"]           # recommendations + impact + effort
-result.decision["top_actions"]           # top 3
+result.decision["next_steps"]            # every action: evidence, fix, severity, source, priority
+result.decision["top_actions"]           # top 3 of next_steps
 result.decision["drift_severity"]        # none|low|medium|high
+
+# drift, expected schema, metrics
+result.drift_report                      # findings with the rule/band that fired, status, highlights
+result.contract                          # expected-schema checks (config.expected_schemas)
+result.metrics                           # flat metrics saved to history (rolling baseline input)
 
 with open("report.html", "w") as f:
     f.write(result.html_report)
@@ -482,34 +612,66 @@ with open("report.html", "w") as f:
 ### Drift in code
 
 ```python
-prev = analyze({"source": "file", "path": "data.csv"}).schema_json
-# ... data changes ...
-result = analyze({"source": "file", "path": "data.csv"}, previous_schema=prev)
-print(result.decision["drift_severity"])  # e.g. "high"
-print(result.diff)                          # {'summary': '...', 'has_drift': True}
+from datalens.history.store import HistoryStore
+
+store = HistoryStore("output/.history")
+runs = store.load_runs()                                  # newest first: tag, metrics, categories, …
+result = analyze(spec, Config(drift={"compare_to": "rolling"}),
+                 previous_schema=store.load(runs[0]["tag"]), reference_tag=runs[0]["tag"],
+                 history_runs=runs, drift_mode="rolling")
+print(result.drift_report["status"], result.drift_report["highlights"])
+store.save("2026-05-31", result.schema_json, metrics=result.metrics, categories=result.categories,
+           breached=result.drift_report["breached_metrics"], run_date="2026-05-31")
 ```
 
 ---
 
-## Using it in CI
+## CI/CD — gates, exit codes, notifications
 
-Gate a pipeline on data health or drift:
+Everything in the report is available from the CLI, so a pipeline can react to it:
 
 ```bash
-datalens analyze --source mongodb --db prod --collections users,orders \
-  --uri "$MONGO_URI" --out-dir artifacts --detect-drift
+datalens analyze --cc nightly_export -o output --version-tag "$(date +%F)" --run-date "$(date +%F)" \
+  --compare-to rolling --schema expected.json \
+  --fail-on fail --min-score health=70,dqi=85,completeness=90 --max-drop dqi=5 \
+  --notify "slack:$SLACK_WEBHOOK" --format json > summary.json
 ```
 
-```python
-# fail the build if quality drops or breaking drift appears
-from datalens import analyze
-r = analyze({"source": "file", "path": "data.csv"}, previous_schema=prev)
-verdict = r.decision["health_verdict"]
-if verdict["status"] == "risk" or r.decision["drift_severity"] == "high":
-    raise SystemExit(f"Data health failed: {verdict}")
+| Option | Effect |
+|---|---|
+| `--fail-on never\|warn\|fail` | exit 2 on drift/expected-schema breaches (`fail`), also exit 1 on warnings (`warn`) |
+| `--min-score health=70,dqi=80,…` | exit 2 if a score is below its floor (health, dqi or any DQI dimension) |
+| `--max-drop dqi=5,health=10` | exit 2 if a score fell more than N points vs the drift reference |
+| `--notify slack:<url>` / `webhook:<url>` / `file:<path.jsonl>` | send the outcome (repeatable) |
+| `--format json` | the run summary on stdout (progress goes to stderr) |
+
+**Exit codes:** `0` ok · `1` warnings with `--fail-on warn` · `2` breach or failed gate · `3` error.
+
+Other commands for pipelines:
+
+```bash
+datalens scores <run-dir> --min-score health=70     # gate on a finished run
+datalens drift -o output --compare-to rolling --fail-on fail --format json   # re-check from history only
+datalens history list -o output                      # runs with status, health, DQI, drift
+datalens glossary dqi                                # what a score means and how it's computed
 ```
 
-Publish `{name}-report.html` as a build artifact so reviewers can open it.
+A ready-to-copy GitHub Actions workflow and a cron script: [`examples/scenarios/08-ci-gate`](../examples/scenarios/08-ci-gate/README.md).
+
+---
+
+## Chat with a run
+
+```bash
+datalens serve output/orders_20260531 --ai claude     # report + chat panel on http://127.0.0.1:8765
+datalens ask "Which customers have orphaned orders?" output/orders_20260531 --format md
+```
+
+The model sees the run's findings (scores, drift, expected-schema checks, actions — all masked) and can run
+**read-only SQL** on a PII-masked sample of the data (SQLite; only SELECT; 5 s / 200-row caps). Every query is
+shown with the answer. Answers can be downloaded (CSV / Markdown), added to the Action Plan, or the whole session
+exported. The server binds to 127.0.0.1 only and requires a per-session token; the report file isn't changed.
+Works with any configured provider (Claude CLI, Cursor, Copilot, Anthropic, OpenAI).
 
 ---
 
@@ -521,8 +683,10 @@ Publish `{name}-report.html` as a build artifact so reviewers can open it.
 | **Pre-warehouse / pre-ingest gate** | Check Fitness-for-Use ("Ready for reporting") and the Action Plan before loading. |
 | **ML readiness check** | Look for "Ready for ML/AI" badges and the type-stability / PII drivers. |
 | **Governance / sharing review** | Use the PII Detection tab + Compliance scorecard; keep masking on. |
-| **Monitor a feed over time** | Schedule runs with `--detect-drift`; watch the Trends & Drift tab. |
+| **Monitor a feed over time** | Schedule runs with `--compare-to rolling`; watch Trends & Drift; gate with `--fail-on fail`. |
+| **Enforce a contract** | Write (or `schema infer`) an expected JSON Schema and pass `--schema`. |
+| **Investigate a finding** | `datalens serve <run-dir>` and ask; add answers to the Action Plan. |
 | **Brief a stakeholder** | Send the HTML report; point them at the Overview banner (or print to PDF). |
-| **Automate quality gates** | Use the library + `decision` in CI as shown above. |
+| **Automate quality gates** | `--fail-on`, `--min-score`, `--max-drop`, `--notify` — see CI/CD above. |
 
 Next: understand exactly what each section means in the **[Report Guide](REPORT_GUIDE.md)**.

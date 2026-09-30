@@ -2,7 +2,7 @@
 
 Source of truth: ``assets/logo.svg`` / ``assets/logo-dark.svg`` (repo root).
 The ICON_* variants are the lens mark with the wordmark stripped and the
-viewBox cropped; the header renders the "Datalens / Schema Analysis" wordmark
+viewBox cropped; the header renders the "Datalens" wordmark
 as HTML text beside the icon. Regenerate via the snippet in this file's PR.
 """
 
@@ -94,13 +94,9 @@ LOGO_LIGHT_SVG = r'''<svg viewBox="0 0 500 170" xmlns="http://www.w3.org/2000/sv
   <circle cx="205" cy="85" r="2.5" fill="white"/>
 
   <!-- ── WORDMARK ───────────────────────────────────────────────────────── -->
-  <text x="228" y="76" font-size="40" font-weight="800" letter-spacing="-1.5">
+  <text x="228" y="99" font-size="40" font-weight="800" letter-spacing="-1.5">
     <tspan fill="#0ea5e9">Data</tspan><tspan fill="#1e293b">lens</tspan>
   </text>
-  <text x="230" y="104" font-size="13.5" font-weight="500" fill="#64748b" letter-spacing="3.5">SCHEMA ANALYSIS</text>
-
-  <!-- ── TAGLINE SEPARATOR ─────────────────────────────────────────────── -->
-  <line x1="230" y1="112" x2="498" y2="112" stroke="#e2e8f0" stroke-width="1"/>
 </svg>
 '''
 
@@ -188,13 +184,9 @@ LOGO_DARK_SVG = r'''<svg viewBox="0 0 500 170" xmlns="http://www.w3.org/2000/svg
   <circle cx="205" cy="85" r="2.5" fill="#e0f2fe"/>
 
   <!-- ── WORDMARK ───────────────────────────────────────────────────────── -->
-  <text x="228" y="76" font-size="40" font-weight="800" letter-spacing="-1.5">
+  <text x="228" y="99" font-size="40" font-weight="800" letter-spacing="-1.5">
     <tspan fill="#38bdf8">Data</tspan><tspan fill="#f1f5f9">lens</tspan>
   </text>
-  <text x="230" y="104" font-size="13.5" font-weight="500" fill="#64748b" letter-spacing="3.5">SCHEMA ANALYSIS</text>
-
-  <!-- ── SEPARATOR ─────────────────────────────────────────────────────── -->
-  <line x1="230" y1="112" x2="490" y2="112" stroke="#1e293b" stroke-width="1"/>
 </svg>
 '''
 

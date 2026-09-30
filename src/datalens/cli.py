@@ -33,10 +33,20 @@ from typing import Any
 
 import click
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from datalens import __version__, analyze
+from datalens.ci import (
+    EXIT_ERROR,
+    EXIT_FAIL,
+    build_run_summary,
+    evaluate_gates,
+    notify,
+    parse_gate_spec,
+    reference_scores_from_metrics,
+)
 from datalens.config import Config, ConnectionLoader, load_config
 
 console = Console()
@@ -76,6 +86,9 @@ def _get_artifact_prefix(
         db = source_spec.get("db")
         if db:
             return db.lower()[:20]
+    elif source_lower == "bigquery":
+        name = source_spec.get("dataset") or "bigquery"
+        return str(name).lower().replace("-", "_")[:20]
     elif source_lower == "file":
         path = source_spec.get("path")
         if path:
@@ -134,7 +147,7 @@ def _get_output_subdir_name(
 @click.version_option(version=__version__, prog_name="datalens")
 def cli() -> None:
     """
-    Datalens — Advanced Schema Analysis & Data Profiling
+    Datalens — Data Health Intelligence
 
     Analyze schemas, profile data quality, discover patterns and relationships,
     and generate rich interactive reports.
@@ -146,7 +159,7 @@ def cli() -> None:
 @click.option(
     "--source",
     "-s",
-    type=click.Choice(["file", "mongodb", "s3", "http"], case_sensitive=False),
+    type=click.Choice(["file", "mongodb", "s3", "http", "bigquery"], case_sensitive=False),
     required=False,
     help="Data source type (optional if using --cc)",
 )
@@ -179,7 +192,21 @@ def cli() -> None:
 )
 @click.option(
     "--collections",
-    help='Comma-separated collection names (e.g., "users,orders")',
+    "--tables",
+    "collections",
+    help='Comma-separated collections / tables (e.g., "users,orders"); default: all',
+)
+@click.option(
+    "--project",
+    help="GCP project (bigquery source; default: from credentials)",
+)
+@click.option(
+    "--dataset",
+    help="BigQuery dataset (bigquery source)",
+)
+@click.option(
+    "--location",
+    help="BigQuery location, e.g. EU or us-central1 (bigquery source)",
 )
 @click.option(
     "--object",
@@ -257,13 +284,61 @@ def cli() -> None:
 )
 @click.option(
     "--compare-to",
-    help="Compare against a specific saved run (version tag) to show drift in the report.",
+    help="Drift reference: 'previous' (last run), 'rolling' (baseline learned from recent runs), "
+    "'baseline:<tag>' or just '<tag>' (a fixed saved run).",
 )
 @click.option(
     "--detect-drift",
     is_flag=True,
     default=False,
-    help="Compare against the most recent saved run to show schema drift.",
+    help="Compute drift against the configured reference (drift.compare_to; default: previous run).",
+)
+@click.option(
+    "--run-date",
+    default=None,
+    help="Logical date of the data (e.g. 2026-05-31). History is ordered by it, so back-fills work.",
+)
+@click.option(
+    "--drift-rules",
+    type=click.Path(exists=True),
+    default=None,
+    help="YAML file with drift rules (a 'drift:' section, or the rules themselves).",
+)
+@click.option(
+    "--schema",
+    "expected_schemas",
+    multiple=True,
+    help="BYOS: expected JSON Schema to validate against — 'expected.json' or 'OBJECT=file.json' "
+    "(repeatable). x-datalens blocks inside set per-field drift thresholds.",
+)
+@click.option(
+    "--fail-on",
+    type=click.Choice(["never", "warn", "fail"], case_sensitive=False),
+    default="never",
+    help="Exit non-zero on drift: 'fail' → exit 2 on breaches, 'warn' → also exit 1 on warnings.",
+)
+@click.option(
+    "--min-score",
+    default=None,
+    help="Score floors, e.g. 'health=70,dqi=80,completeness=90' (exit 2 if any is below).",
+)
+@click.option(
+    "--max-drop",
+    default=None,
+    help="Max allowed score drop vs the drift reference, e.g. 'dqi=5,health=10' (exit 2 if exceeded).",
+)
+@click.option(
+    "--notify",
+    "notify_targets",
+    multiple=True,
+    help="Send the outcome to 'slack:<webhook>', 'webhook:<url>' or 'file:<path.jsonl>' (repeatable).",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"], case_sensitive=False),
+    default="text",
+    help="'json' prints the machine-readable run summary to stdout (progress goes to stderr).",
 )
 @click.option(
     "--history-dir",
@@ -322,6 +397,11 @@ def cli() -> None:
     help="AI provider for insights (default: off)",
 )
 @click.option(
+    "--ai-model",
+    default=None,
+    help="Model for --ai (default: auto — the provider picks). A model the provider rejects falls back to auto.",
+)
+@click.option(
     "--mask-pii/--no-mask-pii",
     default=True,
     help="Mask detected PII in reports (default: enabled)",
@@ -340,6 +420,9 @@ def analyze_cmd(
     recursive: bool | None,
     db: str | None,
     collections: str | None,
+    project: str | None,
+    dataset: str | None,
+    location: str | None,
     objects: tuple[str, ...],
     uri: str | None,
     sample_size: int | None,
@@ -354,6 +437,14 @@ def analyze_cmd(
     version_tag: str | None,
     compare_to: str | None,
     detect_drift: bool,
+    run_date: str | None,
+    drift_rules: str | None,
+    expected_schemas: tuple[str, ...],
+    fail_on: str,
+    min_score: str | None,
+    max_drop: str | None,
+    notify_targets: tuple[str, ...],
+    output_format: str,
     history_dir: str | None,
     history_retention_days: int | None,
     history_protected_tags: tuple[str, ...],
@@ -363,6 +454,7 @@ def analyze_cmd(
     report_coverage_reduction: bool | None,
     report_coverage_increase: bool | None,
     ai: str,
+    ai_model: str | None,
     mask_pii: bool,
     debug: bool,
 ) -> None:
@@ -372,6 +464,13 @@ def analyze_cmd(
     Supports local files (CSV, JSON, XML, XLSX) and MongoDB databases.
     Generates a self-contained interactive HTML report.
     """
+    if output_format == "json":
+        console.file = sys.stderr  # keep stdout clean for the JSON summary
+    try:
+        min_scores = parse_gate_spec(min_score, option="--min-score")
+        max_drops = parse_gate_spec(max_drop, option="--max-drop")
+    except ValueError as e:
+        raise click.UsageError(str(e))
     try:
         # Validate that either --source or --cc is provided
         if not source and not connection_config:
@@ -395,12 +494,16 @@ def analyze_cmd(
             collections=collections,
             objects=objects,
             uri=uri,
+            project=project,
+            dataset=dataset,
+            location=location,
         )
 
         # Merge connection config if provided
         conn_profiling: dict[str, Any] = {}
         conn_drift: dict[str, Any] = {}
         conn_history: dict[str, Any] = {}
+        conn_schema: Any = None
         if connection_config:
             source_spec = _merge_connection_config(source_spec, connection_config, debug)
             # Display connection metadata if available
@@ -410,6 +513,7 @@ def analyze_cmd(
                 conn_profiling = conn_cfg.profiling or {}
                 conn_drift = conn_cfg.drift or {}
                 conn_history = conn_cfg.history or {}
+                conn_schema = getattr(conn_cfg, "expected_schema", None)
                 if conn_cfg.metadata:
                     metadata_info = []
                     if conn_cfg.metadata.get("description"):
@@ -493,20 +597,29 @@ def analyze_cmd(
             history_protected_tags=protected_tags,
             out_dir=structured_out_dir,
             version_tag=version_tag,
+            run_date=run_date,
             ai_provider=ai if ai != "auto" else "",
+            ai_model=ai_model,
             mask_pii=mask_pii,
             debug=debug,
         )
+
+        # Drift rules: app config ← connection config 'drift' ← --drift-rules file.
+        config.drift = _merge_drift_rules(config.drift, conn_drift, drift_rules)
+        if expected_schemas:
+            config.expected_schemas = list(expected_schemas)
+        elif conn_schema:
+            config.expected_schemas = [conn_schema] if isinstance(conn_schema, str) else list(conn_schema)
 
         # Show header (use source_spec source if available, otherwise source flag)
         display_source = source_spec.get("source") or source or "unknown"
         console.print(Panel.fit(
             f"[bold cyan]◆[/bold cyan] [bold]Datalens[/bold] v{__version__}\n"
-            f"[dim]Advanced Schema Analysis & Data Profiling[/dim]\n\n"
+            f"[dim]Data Health Intelligence — learns normal, flags what matters[/dim]\n\n"
             f"Source: [cyan]{display_source}[/cyan]\n"
             f"Output: [green]{config.out_dir}[/green]\n"
             f"Version: [yellow]{config.version_tag}[/yellow]",
-            title="Schema Analysis",
+            title="Analysis",
         ))
 
         # Set up versioned history store for drift detection.
@@ -515,21 +628,30 @@ def analyze_cmd(
         store_dir = Path(history_dir) if history_dir else Path(out_dir) / ".history"
         history_store = HistoryStore(store_dir)
 
-        # Load a previous run to compare against (drift), if requested.
+        # Resolve the drift reference (previous run, fixed baseline, or rolling window).
+        drift_mode = _resolve_drift_mode(compare_to, detect_drift, config.drift)
         previous_schema = None
-        if compare_to:
-            previous_schema = history_store.load(compare_to)
+        reference_tag = None
+        history_runs: list[dict[str, Any]] = []
+        if drift_mode:
+            history_runs = history_store.load_runs(exclude=config.version_tag)
+            if drift_mode.startswith("baseline:"):
+                reference_tag = drift_mode.split(":", 1)[1]
+            elif history_runs:
+                reference_tag = history_runs[0]["tag"]
+            if reference_tag:
+                previous_schema = history_store.load(reference_tag)
             if previous_schema is None:
-                console.print(
-                    f"[yellow]⚠ No saved run found for --compare-to '{compare_to}'; "
-                    f"proceeding without drift.[/yellow]"
-                )
-        elif detect_drift:
-            previous_schema = history_store.get_latest()
-            if previous_schema is None:
-                console.print(
-                    "[yellow]⚠ No prior run in history yet; this run becomes the baseline.[/yellow]"
-                )
+                if reference_tag:
+                    console.print(
+                        f"[yellow]⚠ No saved run found for '{reference_tag}'; proceeding without drift.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        "[yellow]⚠ No prior run in history yet; this run becomes the baseline.[/yellow]"
+                    )
+                drift_mode = None
+                history_runs = []
 
         # Run analysis with progress indicator
         with Progress(
@@ -539,13 +661,35 @@ def analyze_cmd(
         ) as progress:
             task = progress.add_task("Analyzing schema...", total=None)
 
-            result = analyze(source_spec, config, previous_schema=previous_schema)
+            result = analyze(
+                source_spec, config,
+                previous_schema=previous_schema,
+                history_runs=history_runs,
+                drift_mode=drift_mode,
+                reference_tag=reference_tag,
+            )
 
             progress.update(task, description="[green]Analysis complete!")
 
-        # Persist this run so future runs can detect drift against it.
+        run_summary = build_run_summary(result, run_date=run_date)
+
+        # Persist this run so future runs can detect drift against it (and so the
+        # rolling baseline can learn from its metrics).
         try:
-            history_store.save(config.version_tag, result.schema_json)
+            history_store.save(
+                config.version_tag,
+                result.schema_json,
+                metrics=result.metrics,
+                categories=result.categories,
+                breached=(result.drift_report or {}).get("breached_metrics", []),
+                run_date=run_date,
+                summary={
+                    "status": run_summary["status"],
+                    "health": run_summary["scores"].get("health"),
+                    "dqi": run_summary["scores"].get("dqi"),
+                    "drift": (run_summary["drift"] or {}).get("status"),
+                },
+            )
         except Exception as e:  # history is best-effort; never fail the run
             if debug:
                 console.print(f"[yellow]Could not save run to history: {e}[/yellow]")
@@ -612,6 +756,32 @@ def analyze_cmd(
                 f"📈 Coverage Drift JSON: [link=file://{coverage_drift_file.absolute()}]{coverage_drift_file}[/link]"
             )
 
+        if result.contract is not None:
+            contract_file = out_path / f"{artifact_prefix}-datalens-contract.json"
+            contract_file.write_text(json.dumps(result.contract, indent=2, ensure_ascii=False, default=str),
+                                     encoding="utf-8")
+            console.print(f"📐 Expected-schema check: [link=file://{contract_file.absolute()}]{contract_file}[/link]")
+
+        if result.drift_report is not None:
+            drift_file = out_path / f"{artifact_prefix}-datalens-drift-report.json"
+            drift_file.write_text(json.dumps(result.drift_report, indent=2, ensure_ascii=False, default=str),
+                                  encoding="utf-8")
+            console.print(f"🧭 Drift Report JSON: [link=file://{drift_file.absolute()}]{drift_file}[/link]")
+
+        manifest_file = out_path / f"{artifact_prefix}-datalens-run-manifest.json"
+        manifest_file.write_text(json.dumps({
+            "version_tag": config.version_tag,
+            "run_date": run_date,
+            "source_spec": _safe_source_spec(source_spec),
+            "connection_config": connection_config,
+            "sample_size": config.sample_size,
+            "history_dir": str(store_dir),
+        }, indent=2, default=str), encoding="utf-8")
+
+        summary_file = out_path / f"{artifact_prefix}-datalens-run-summary.json"
+        summary_file.write_text(json.dumps(run_summary, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        console.print(f"🧾 Run Summary JSON: [link=file://{summary_file.absolute()}]{summary_file}[/link]")
+
         # Save AI insights markdown when generated
         if result.ai_insights_md:
             ai_md_file = out_path / f"{artifact_prefix}-datalens-ai-insights.md"
@@ -631,6 +801,25 @@ def analyze_cmd(
             title="[bold cyan]◆ Datalens Results[/bold cyan]",
         ))
 
+        _print_scores_and_drift(run_summary)
+
+        # Quality gates → exit code, then notifications.
+        reference_metrics = next(
+            (r["metrics"] for r in history_runs if r.get("tag") == reference_tag), None
+        )
+        exit_code, reasons = evaluate_gates(
+            run_summary,
+            fail_on=fail_on.lower(),
+            min_scores=min_scores,
+            max_drops=max_drops,
+            reference_scores=reference_scores_from_metrics(reference_metrics),
+        )
+        for line in notify(list(notify_targets), run_summary, exit_code, reasons):
+            console.print(line)
+        if reasons:
+            console.print(Panel(escape("\n".join(reasons)), title=f"Gates → exit {exit_code}",
+                                border_style="red" if exit_code >= EXIT_FAIL else "yellow"))
+
         # Print closing message with branding
         console.print("\n[bold cyan]✓[/bold cyan] [bold]Analysis complete![/bold]")
         console.print("[dim]Open the HTML report to explore your data with Datalens.[/dim]\n")
@@ -640,12 +829,102 @@ def analyze_cmd(
             for warning in result.warnings:
                 console.print(f"  ⚠️  {warning}")
 
+        if output_format == "json":
+            click.echo(json.dumps({**run_summary, "exit_code": exit_code, "gate_reasons": reasons},
+                                  indent=2, default=str))
+        sys.exit(exit_code)
+
+    except click.UsageError:
+        raise
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         if debug:
             import traceback
             console.print(traceback.format_exc())
-        sys.exit(1)
+        sys.exit(EXIT_ERROR)
+
+
+def _safe_source_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Source spec without secrets (credentials in URIs are dropped; --cc runs re-resolve them)."""
+    keep = {"source", "path", "root", "sheets", "pattern", "recursive", "db", "collections", "objects", "member",
+            "project", "dataset", "location", "max_bytes_billed"}
+    out = {k: v for k, v in spec.items() if k in keep}
+    uri = spec.get("uri")
+    if isinstance(uri, str) and "@" not in uri and "token" not in uri.lower() and "key=" not in uri.lower():
+        out["uri"] = uri
+    if isinstance(out.get("path"), str):
+        out["path"] = str(Path(out["path"]).resolve())
+    return out
+
+
+def _resolve_drift_mode(compare_to: str | None, detect_drift: bool, drift_cfg: dict[str, Any]) -> str | None:
+    """Map --compare-to / --detect-drift / drift.compare_to to previous | rolling | baseline:<tag>."""
+    if compare_to:
+        value = compare_to.strip()
+        if value.lower() in ("previous", "latest", "last"):
+            return "previous"
+        if value.lower() == "rolling":
+            return "rolling"
+        if value.lower().startswith("baseline:"):
+            return f"baseline:{value.split(':', 1)[1]}"
+        return f"baseline:{value}"  # a bare tag is a fixed baseline
+    if detect_drift:
+        return _resolve_drift_mode(str((drift_cfg or {}).get("compare_to") or "previous"), False, {})
+    return None
+
+
+def _merge_drift_rules(
+    base: dict[str, Any] | None, conn_drift: dict[str, Any] | None, rules_file: str | None
+) -> dict[str, Any]:
+    """Layer drift rules: app config, then the connection config, then --drift-rules."""
+    from datalens.drift.rules import _merge
+
+    legacy = {"coverage_thresholds", "report_reduction_threshold_exceeds", "report_increase_threshold_exceeds"}
+    merged = dict(base or {})
+    merged = _merge(merged, {k: v for k, v in (conn_drift or {}).items() if k not in legacy})
+    if rules_file:
+        import yaml
+
+        data = yaml.safe_load(Path(rules_file).read_text(encoding="utf-8")) or {}
+        merged = _merge(merged, data.get("drift", data) if isinstance(data, dict) else {})
+    return merged
+
+
+def _print_scores_and_drift(summary: dict[str, Any]) -> None:
+    """Terminal view of the scores and the drift highlights."""
+    scores = summary.get("scores") or {}
+    icon = {"healthy": "🟢", "attention": "🟡", "risk": "🔴"}.get(summary.get("status") or "", "⚪")
+    dims = "  ".join(
+        f"{name} [cyan]{scores[name]:.0f}[/cyan]"
+        for name in ("completeness", "consistency", "uniqueness", "validity", "timeliness", "granularity", "accuracy")
+        if isinstance(scores.get(name), (int, float))
+    )
+    lines = [
+        f"{icon} Health [bold]{scores.get('health')}[/bold] ({summary.get('status')})   "
+        f"DQI [bold]{scores.get('dqi')}[/bold]",
+        dims,
+    ]
+    contract = summary.get("contract")
+    if contract:
+        csum = contract.get("summary") or {}
+        lines.append(
+            f"\nExpected schema: conformance [bold]{contract.get('conformance_pct')}%[/bold] — "
+            f"[red]{csum.get('fail', 0)} fail[/red], [yellow]{csum.get('warn', 0)} warn[/yellow], "
+            f"{csum.get('pass', 0)} pass"
+        )
+        for msg in contract.get("failures", [])[:5]:
+            lines.append(f"  ✗ {escape(msg)}")
+    drift = summary.get("drift")
+    if drift:
+        counts = drift.get("summary") or {}
+        lines.append(
+            f"\nDrift vs [yellow]{drift.get('reference') or drift.get('mode')}[/yellow] ({drift.get('mode')}): "
+            f"[red]{counts.get('fail', 0)} fail[/red], [yellow]{counts.get('warn', 0)} warn[/yellow], "
+            f"{counts.get('info', 0)} info"
+        )
+        for h in drift.get("highlights", [])[:8]:
+            lines.append(f"  • {escape(h)}")
+    console.print(Panel("\n".join(lines), title="[bold cyan]◆ Scores & Drift[/bold cyan]"))
 
 
 def _parse_coverage_threshold_spec(spec: str) -> tuple[str, float]:
@@ -709,6 +988,9 @@ def _build_source_spec(
     uri: str | None,
     pattern: str | None = None,
     recursive: bool | None = None,
+    project: str | None = None,
+    dataset: str | None = None,
+    location: str | None = None,
 ) -> dict[str, Any]:
     """Build source specification dict from CLI options.
 
@@ -743,6 +1025,16 @@ def _build_source_spec(
             spec["uri"] = uri
         if collections:
             spec["collections"] = collections
+        if objects:
+            spec["objects"] = list(objects)
+
+    elif source_lower == "bigquery":
+        if not dataset and not objects:
+            raise click.UsageError("--dataset is required for bigquery (or give --object \"query:SELECT …\")")
+        for key, value in (("project", project), ("dataset", dataset), ("location", location),
+                           ("collections", collections)):
+            if value:
+                spec[key] = value
         if objects:
             spec["objects"] = list(objects)
 
@@ -784,7 +1076,8 @@ def _merge_connection_config(
             # Source type from --source flag takes precedence
             if source_spec["source"] != conn_config.source_type:
                 merged_spec["source"] = source_spec["source"]
-        elif key in ("path", "root", "sheets", "pattern", "recursive", "db", "collections", "objects", "uri"):
+        elif key in ("path", "root", "sheets", "pattern", "recursive", "db", "collections", "objects", "uri",
+                     "project", "dataset", "location"):
             # Only add if provided in CLI (not None)
             if value is not None:
                 merged_spec[key] = value
@@ -793,6 +1086,304 @@ def _merge_connection_config(
         console.print(f"[dim]Merged source spec: {merged_spec}[/dim]")
 
     return merged_spec
+
+
+# ─── CI-friendly commands: history, drift, scores, schema ───────────────────
+
+
+def _history_store(history_dir: str | None, out_dir: str):
+    from datalens.history.store import HistoryStore
+
+    return HistoryStore(Path(history_dir) if history_dir else Path(out_dir) / ".history")
+
+
+@cli.group()
+def history() -> None:
+    """Inspect saved runs (the series drift and the rolling baseline learn from)."""
+
+
+@history.command("list")
+@click.option("--out-dir", "-o", default="output", help="Output directory whose .history to read.")
+@click.option("--history-dir", default=None, help="History directory (default: <out-dir>/.history).")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def history_list(out_dir: str, history_dir: str | None, output_format: str) -> None:
+    """List saved runs, newest first, with their scores and drift status."""
+    runs = _history_store(history_dir, out_dir).load_runs()
+    if output_format == "json":
+        click.echo(json.dumps([{k: r[k] for k in ("tag", "run_date", "summary")} for r in runs], indent=2))
+        return
+    from rich.table import Table
+
+    table = Table(title=f"{len(runs)} saved run(s)")
+    for col in ("tag", "run date", "status", "health", "dqi", "drift"):
+        table.add_column(col)
+    for r in runs:
+        summ = r.get("summary") or {}
+        table.add_row(r["tag"], str(r.get("run_date") or "")[:19], str(summ.get("status", "")),
+                      str(summ.get("health", "")), str(summ.get("dqi", "")), str(summ.get("drift", "")))
+    console.print(table)
+
+
+@cli.command("drift")
+@click.option("--run", "run_tag", default=None, help="Run to evaluate (default: the latest saved run).")
+@click.option("--compare-to", default="previous",
+              help="'previous', 'rolling', 'baseline:<tag>' or '<tag>' (default: previous).")
+@click.option("--out-dir", "-o", default="output", help="Output directory whose .history to read.")
+@click.option("--history-dir", default=None, help="History directory (default: <out-dir>/.history).")
+@click.option("--drift-rules", type=click.Path(exists=True), default=None, help="YAML drift rules.")
+@click.option("--config", "-c", "config_file", type=click.Path(exists=True), help="App config (YAML).")
+@click.option("--fail-on", type=click.Choice(["never", "warn", "fail"]), default="never")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def drift_cmd(run_tag, compare_to, out_dir, history_dir, drift_rules, config_file, fail_on, output_format) -> None:
+    """
+    Re-evaluate drift between saved runs — no access to the data needed.
+
+    Useful to tune thresholds on past runs, or to gate a pipeline step that runs
+    after profiling. Uses each run's saved schema and metrics.
+    """
+    from datalens.ci import EXIT_WARN, EXIT_OK
+    from datalens.drift import DriftRules, build_drift_report
+
+    store = _history_store(history_dir, out_dir)
+    runs = store.load_runs()
+    if not runs:
+        raise click.UsageError("No saved runs found. Run `datalens analyze` first.")
+    current = next((r for r in runs if r["tag"] == run_tag), None) if run_tag else runs[0]
+    if current is None:
+        raise click.UsageError(f"Run '{run_tag}' not found in history.")
+    earlier = runs[runs.index(current) + 1:]  # runs are newest first
+
+    cfg = load_config(config_file=config_file)
+    rules = DriftRules(_merge_drift_rules(cfg.drift, {}, drift_rules))
+    mode = _resolve_drift_mode(compare_to, False, {}) or "previous"
+    ref_tag = mode.split(":", 1)[1] if mode.startswith("baseline:") else (earlier[0]["tag"] if earlier else None)
+    if ref_tag is None:
+        raise click.UsageError("No earlier run to compare against.")
+    ref = next((r for r in runs if r["tag"] == ref_tag), None)
+    report = build_drift_report(
+        store.load(current["tag"]) or {}, current["metrics"], rules=rules, mode=mode, reference_tag=ref_tag,
+        reference_schema=store.load(ref_tag), reference_metrics=(ref or {}).get("metrics"), history=earlier,
+    )
+    if report is None:
+        raise click.UsageError("Nothing to compare.")
+    code = EXIT_OK
+    if fail_on in ("fail", "warn") and report["status"] == "fail":
+        code = EXIT_FAIL
+    elif fail_on == "warn" and report["status"] == "warn":
+        code = EXIT_WARN
+    if output_format == "json":
+        click.echo(json.dumps({**report, "run": current["tag"], "exit_code": code}, indent=2, default=str))
+    else:
+        counts = report["summary"]
+        lines = [f"Run [bold]{current['tag']}[/bold] vs [yellow]{ref_tag}[/yellow] ({mode}): "
+                 f"[red]{counts['fail']} fail[/red], [yellow]{counts['warn']} warn[/yellow], {counts['info']} info"]
+        for f in report["findings"]:
+            color = {"fail": "red", "warn": "yellow"}.get(f["severity"], "dim")
+            lines.append(f"[{color}]{f['severity']:>4}[/{color}]  {escape(f['message'])}")
+            lines.append(f"      [dim]rule: {escape(str(f['rule'].get('threshold')))} · "
+                         f"scope: {f['rule'].get('scope')}[/dim]")
+        for note in report.get("notes", []):
+            lines.append(f"[dim]note: {escape(note)}[/dim]")
+        console.print(Panel("\n".join(lines), title="◆ Drift"))
+    sys.exit(code)
+
+
+@cli.command("scores")
+@click.argument("run", type=click.Path(exists=True))
+@click.option("--min-score", default=None, help="Score floors, e.g. 'health=70,dqi=80'.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def scores_cmd(run: str, min_score: str | None, output_format: str) -> None:
+    """
+    Show (and gate on) the scores of a finished run.
+
+    RUN is a run output directory or its *-datalens-run-summary.json file.
+    """
+    path = Path(run)
+    if path.is_dir():
+        matches = sorted(path.glob("*-datalens-run-summary.json"))
+        if not matches:
+            raise click.UsageError(f"No *-datalens-run-summary.json in {path}")
+        path = matches[0]
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        gates = parse_gate_spec(min_score, option="--min-score")
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    code, reasons = evaluate_gates(summary, min_scores=gates)
+    if output_format == "json":
+        click.echo(json.dumps({"scores": summary.get("scores"), "status": summary.get("status"),
+                               "exit_code": code, "gate_reasons": reasons}, indent=2))
+    else:
+        _print_scores_and_drift(summary)
+        for r in reasons:
+            console.print(f"[red]✗[/red] {r}")
+    sys.exit(code)
+
+
+@cli.group()
+def schema() -> None:
+    """BYOS helpers: infer an expected schema from data, or validate data against one."""
+
+
+def _profile_for_schema(source, path, pattern, connection_config, sample_size):
+    spec = _build_source_spec(source=source or "unknown", path=path, root=None, sheets=None, db=None,
+                              collections=None, objects=(), uri=None, pattern=pattern)
+    if connection_config:
+        spec = _merge_connection_config(spec, connection_config)
+    config = load_config(sample_size=sample_size, ai_provider="")
+    return analyze(spec, config)
+
+
+@schema.command("infer")
+@click.option("--source", "-s", type=click.Choice(["file", "mongodb", "s3", "http"]), default=None)
+@click.option("--path", "-p", type=click.Path(exists=True), default=None)
+@click.option("--pattern", default=None)
+@click.option("--cc", "connection_config", default=None, help="Connection config name or file.")
+@click.option("--sample-size", type=int, default=None)
+@click.option("--output", "-o", "output", type=click.Path(), required=True, help="Where to write the JSON Schema.")
+@click.option("--required-coverage", type=float, default=99.0,
+              help="Fields populated in at least this % of rows are marked required (default 99).")
+def schema_infer(source, path, pattern, connection_config, sample_size, output, required_coverage) -> None:
+    """Write an expected JSON Schema learned from the data — then review and own it."""
+    from datalens.contract import infer_schema
+
+    if not source and not connection_config:
+        raise click.UsageError("Either --source/-s or --cc must be provided")
+    result = _profile_for_schema(source, path, pattern, connection_config, sample_size)
+    inferred = infer_schema(result.schema_json, required_coverage=required_coverage)
+    Path(output).write_text(json.dumps(inferred, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    n = sum(len((o.get("properties") or {})) for o in inferred["objects"].values())
+    console.print(f"📐 Wrote expected schema for {len(inferred['objects'])} object(s), {n} top-level field(s): {output}")
+    console.print("[dim]Edit it (types, required, enum, ranges, x-datalens thresholds), then pass it with "
+                  "`datalens analyze --schema <file>`.[/dim]")
+
+
+@schema.command("validate")
+@click.option("--source", "-s", type=click.Choice(["file", "mongodb", "s3", "http"]), default=None)
+@click.option("--path", "-p", type=click.Path(exists=True), default=None)
+@click.option("--pattern", default=None)
+@click.option("--cc", "connection_config", default=None, help="Connection config name or file.")
+@click.option("--sample-size", type=int, default=None)
+@click.option("--schema", "expected_schemas", multiple=True, required=True,
+              help="Expected JSON Schema: 'file.json' or 'OBJECT=file.json' (repeatable).")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def schema_validate(source, path, pattern, connection_config, sample_size, expected_schemas, output_format) -> None:
+    """Check data against expected schema(s); exit 2 when any check fails."""
+    from datalens.contract import load_expected_schemas, validate_contract
+
+    if not source and not connection_config:
+        raise click.UsageError("Either --source/-s or --cc must be provided")
+    result = _profile_for_schema(source, path, pattern, connection_config, sample_size)
+    report = validate_contract(result.schema_json, load_expected_schemas(list(expected_schemas)))
+    code = EXIT_FAIL if report and report["status"] == "fail" else 0
+    if output_format == "json":
+        click.echo(json.dumps({**(report or {}), "exit_code": code}, indent=2, default=str))
+    else:
+        for obj in (report or {}).get("objects", []):
+            lines = [f"conformance [bold]{obj['conformance_pct']}%[/bold] · schema {obj['schema']}"]
+            for c in obj["checks"]:
+                if c["status"] == "pass":
+                    continue
+                color = {"fail": "red", "warn": "yellow"}.get(c["status"], "dim")
+                lines.append(f"[{color}]{c['status']:>4}[/{color}]  {escape(c['message'])}")
+            console.print(Panel("\n".join(lines), title=f"◆ {obj['object']}"))
+    sys.exit(code)
+
+
+@cli.command("glossary")
+@click.argument("term", required=False)
+@click.option("--markdown", is_flag=True, help="Print the full glossary as Markdown (docs/METRICS.md).")
+def glossary_cmd(term: str | None, markdown: bool) -> None:
+    """Explain a score or check: what it means, when it's computed, and how (e.g. `datalens glossary dqi`)."""
+    from datalens.glossary import GLOSSARY, to_markdown
+
+    if markdown:
+        click.echo(to_markdown())
+        return
+    keys = [term.lower()] if term else list(GLOSSARY)
+    for key in keys:
+        entry = GLOSSARY.get(key)
+        if entry is None:
+            raise click.UsageError(f"Unknown term '{term}'. Known: {', '.join(GLOSSARY)}")
+        body = [escape(entry["short"]), "", f"[dim]When:[/dim] {escape(entry['when'])}", "[dim]How:[/dim]"]
+        body += [f"  • {escape(step)}" for step in entry["how"]]
+        console.print(Panel("\n".join(body), title=f"{entry['title']}  [dim]({key})[/dim]"))
+
+
+_AI_CHOICES = click.Choice(["anthropic", "openai", "cursor", "copilot", "claude", "auto"], case_sensitive=False)
+
+
+def _chat_provider(ai: str):
+    from datalens.ai.registry import get_ai_provider
+
+    provider = get_ai_provider(load_config(ai_provider="" if ai == "auto" else ai))
+    if provider.name == "noop" or not provider.is_available():
+        raise click.UsageError(
+            f"AI provider '{ai}' is not available. Log in to a CLI (claude / cursor-agent / gh copilot) or set "
+            "ANTHROPIC_API_KEY / OPENAI_API_KEY — see docs/AI_PROVIDERS.md.")
+    return provider
+
+
+@cli.command("serve")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--ai", default="auto", type=_AI_CHOICES, help="AI provider for chat (default: auto-detect).")
+@click.option("--port", default=8765, type=int, help="Local port (bound to 127.0.0.1 only).")
+@click.option("--sample-size", default=20000, type=int, help="Rows per object loaded for SQL questions.")
+@click.option("--no-open", is_flag=True, help="Don't open a browser.")
+def serve_cmd(run_dir: str, ai: str, port: int, sample_size: int, no_open: bool) -> None:
+    """
+    Open a run's report with a chat panel: ask questions, get answers backed by
+    SQL on a PII-masked sample, download them, or add them to the Action Plan.
+    Localhost only; the report file itself is not modified.
+    """
+    from datalens.chat.server import serve
+    from datalens.chat.workspace import RunWorkspace
+
+    provider = _chat_provider(ai)
+    ws = RunWorkspace(run_dir, sample_size=sample_size)
+    console.print("[dim]Loading a masked sample of the data for SQL…[/dim]")
+    ready = ws.connection() is not None
+    server, url = serve(ws, provider, port=port)
+    console.print(Panel(
+        f"Report + chat: [link={url}]{url}[/link]\nAI: [cyan]{provider.name}[/cyan] · SQL: "
+        + (f"[green]{', '.join(ws.tables)}[/green]" if ready else f"[yellow]off[/yellow] ({escape(ws.load_error or '')})")
+        + "\n[dim]Ctrl+C to stop.[/dim]", title="◆ datalens serve"))
+    if not no_open:
+        import webbrowser
+
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+@cli.command("ask")
+@click.argument("question")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--ai", default="auto", type=_AI_CHOICES, help="AI provider (default: auto-detect).")
+@click.option("--sample-size", default=20000, type=int, help="Rows per object loaded for SQL questions.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json", "md"]), default="text")
+def ask_cmd(question: str, run_dir: str, ai: str, sample_size: int, output_format: str) -> None:
+    """One-shot question about a run (scriptable): `datalens ask "why did health drop?" output/run_x`."""
+    from datalens.chat import ChatSession, RunWorkspace, answer_to_markdown
+
+    ws = RunWorkspace(run_dir, sample_size=sample_size)
+    reply = ChatSession(ws, _chat_provider(ai)).ask(question)
+    if output_format == "json":
+        click.echo(json.dumps(reply, indent=2, default=str))
+    elif output_format == "md":
+        click.echo(answer_to_markdown(question, reply))
+    else:
+        if not reply.get("ok"):
+            console.print(f"[red]Error:[/red] {escape(str(reply.get('error')))}")
+            sys.exit(EXIT_ERROR)
+        from rich.markdown import Markdown
+
+        console.print(Markdown(answer_to_markdown(question, reply)))
+    sys.exit(0 if reply.get("ok") else EXIT_ERROR)
 
 
 @cli.command()

@@ -1,114 +1,273 @@
 # Datalens.ai 🔍
 
-**Advanced Schema Analysis & Data Profiling — with a decision layer for analysts and stakeholders.**
+**Data health intelligence that learns from your data, and tells you what to do next.**
 
-A domain-agnostic tool that profiles any dataset, scores its quality, detects PII, discovers relationships and drift, and turns it all into a single, self-contained, interactive HTML report that both **data analysts** and **business stakeholders** can act on.
+*Learns normal. Flags what matters.*
+
+Point Datalens at files, MongoDB, BigQuery, S3 or an HTTP API. It profiles every object and field, scores quality with
+formulas you can read, finds keys, foreign keys and orphans, masks PII, learns what *normal* looks like for your
+feed, checks it against the schema you expect, and turns every finding into a prioritised action — in one
+offline HTML report, a JSON summary for CI/CD, and an optional chat you can ask follow-up questions.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
----
-
-## Why Datalens
-
-Most profilers tell you *what the data looks like*. Datalens also tells you **what to do about it**:
-
-- a one-screen **health verdict** (🟢/🟡/🔴) and the reasons behind it,
-- a prioritized **action plan** with business impact and effort,
-- a **compliance/PII risk** read for governance, and
-- **what changed since last run** (schema drift) — so you can trust the data before you ship it to a warehouse, a model, or a partner.
-
-It learns from the data in front of it — no baked-in business vocabulary — so it works equally well on finance, retail, healthcare, IoT, media, or anything else.
+![Verdict: health score, what drives it and the top 3 things to fix](docs/images/verdict-overview.png)
 
 ---
 
-## Features
+## Contents
 
-### Profiling & analysis
-- **Schema Analysis** — discover field types, coverage, cardinality, and nested structures across collections/tables/files.
-- **Data Quality Index (DQI)** — transparent 0–100 score with sub-dimensions: completeness, consistency, uniqueness, validity, timeliness, granularity, and (optionally) pattern accuracy.
-- **Pattern Detection** — recognize UUIDs, integer IDs, slugs, dates, URLs, emails, and other value shapes automatically.
-- **PII Detection & Masking** — flag emails, phones, SSNs, payment data, IPs, names, addresses; mask sensitive values in the report (on by default).
-- **Relationships & Join Keys** — infer primary/composite keys, cross-object join candidates, foreign keys by name and by value overlap, and nested hierarchies.
-- **Numeric & Temporal Statistics** — min/max/mean/median/stddev/distribution for numbers; date ranges, span, and future-dated anomalies for timestamps.
-
-### Decision layer (new in v2)
-- **Executive Summary banner** — health verdict, headline KPIs, plain-language narrative, and the **Top 3 things to fix**.
-- **Business-impact & effort** on every recommendation — so non-technical readers can prioritize.
-- **Compliance / PII scorecard** — ratio-based exposure score, risk badge, and a "mask before sharing" list.
-- **Fitness-for-Use ratings** — per object: *Ready for reporting* / *Ready for ML/AI* / *Needs cleanup*.
-- **Functional-dependency hints** — fields that are always null together or share value sets.
-
-### Trends & change tracking (new in v2)
-- **Schema Drift** — compare any run against a previous one: added/removed objects & fields, type changes, coverage shifts, cardinality changes — rendered in a dedicated **Trends & Drift** tab.
-- **Versioned history** — every run is saved so you can detect drift over time without any external store.
-
-### Reporting
-- **Single self-contained HTML** — no server, no CDN, no network calls; works offline and survives being emailed.
-- **Interactive** — global search across tabs, sortable tables, CSV export, distinct-value modals, light/dark mode.
-- **Optional AI** — enrich narratives via Anthropic, OpenAI (API keys), or Cursor / Copilot / Claude (logged-in CLI). Emits `*-ai-insights.md` and an **AI Insights** report tab. Fully functional with **no key and no network**.
+- [Day 1 vs day 2 in 60 seconds](#day-1-vs-day-2-in-60-seconds)
+- [It learns what normal looks like](#it-learns-what-normal-looks-like)
+- [It tells you what to do next](#it-tells-you-what-to-do-next)
+- [Bring your own schema (BYOS)](#bring-your-own-schema-byos)
+- [Every number explains itself](#every-number-explains-itself)
+- [Wire it into CI/CD](#wire-it-into-cicd)
+- [AI review and chat](#ai-review-and-chat)
+- [Coming from variety.js?](#coming-from-varietyjs)
+- [Install](#install) · [Examples](#examples-for-every-scenario) · [Docs](#documentation)
 
 ---
 
-## Quick Start
+## Day 1 vs day 2 in 60 seconds
 
-### Installation
+The repo ships a real, related dataset: IPL cricket from [Cricsheet](https://cricsheet.org) — five entities
+(`matches`, `deliveries`, `players`, `teams`, `venues`), ~160K rows, nested objects and arrays. Day 2 is the next
+load with **10 deliberate problems** injected.
 
 ```bash
-# Clone the repository
+datalens analyze -s file -p test_data/cricket/day1 --pattern "*.jsonl.gz" -o output/demo --version-tag day1
+datalens analyze -s file -p test_data/cricket/day2 --pattern "*.jsonl.gz" -o output/demo --version-tag day2 --detect-drift
+```
+
+| Injected on day 2 | Found as |
+|---|---|
+| `runs.extras` renamed to `runs.extra_runs` | **likely rename** (same type, coverage and values) |
+| `over` int → string in 5% of rows | **type change**, with the share of new-type values |
+| new `ball_speed_kph`, 90% null | new field, 10% populated |
+| `toss.decision` dropped | **removed field** (was 100% populated) |
+| `non_striker_id` null in 30% of rows | **coverage** 100% → 70% |
+| more 4s and 6s in `runs.batter` | **distribution shift** (PSI 0.13, top movers listed) |
+| new wicket kind, new venue | **new category values** |
+| 40% of deliveries missing | **row count** 158,901 → 95,555 |
+| synthetic `players.contact_email` | **new field containing email PII** — masked in every output |
+| 2% of `bowler_id` point to no player | **orphan rate** 0% → 2.1% on `deliveries.bowler_id → players.player_id` |
+
+Along the way it also finds real issues in the source: `season` is an integer for 2017–2019 and a string
+(`"2020/21"`, `"2022"`) afterwards — across five fields in three objects, reported as **one** root cause.
+
+![Drift report: every finding with the rule that fired](docs/images/drift-day-over-day.png)
+
+---
+
+## It learns what normal looks like
+
+Real feeds wobble. In IPL, most days have one match (~250 deliveries) and some have two (~500). Fixed
+day-over-day thresholds cry wolf on every double-header; ignoring volume misses a truncated load.
+
+With `--compare-to rolling`, each metric — row counts, coverage of every field, category counts, orphan rates,
+every score — learns its own normal range from recent runs:
+
+```
+M = median(last N values)      MAD = median(|x − M|)      σ̂ = 1.4826·MAD   (robust: one bad day can't inflate it)
+band = [min(M − 3σ̂ₑ, min seen·0.95),  max(M + 3σ̂ₑ, max seen·1.05)]      σ̂ₑ = max(σ̂, 5%·|M|, sampling noise)
+```
+
+Recurring patterns are learned as normal, runs that breached are kept out of the baseline, and values seen
+anywhere in the window aren't "new". Replaying 12 real match days plus one broken load (feed truncated, 30% nulls):
+
+| | Normal days alerted | Broken day |
+|---|---|---|
+| Fixed day-over-day rules (`--detect-drift`) | **9 of 11** | caught |
+| Learned baseline (`--compare-to rolling`) | 2 during the 3-run cold start, then **0 of 9** | caught — rows 29 vs normal 204–528, `non_striker_id` 55% vs 85–100%, `innings` lost value `2` |
+
+![Rolling baseline: learned bands and the timeline](docs/images/drift-rolling-baseline.png)
+
+Try it: [`examples/scenarios/05-rolling-daily-baseline`](examples/scenarios/05-rolling-daily-baseline/README.md).
+Prefer fixed rules? Every threshold is configurable per dataset, object and field, with separate drop and
+increase limits and your own messages — see [Drift rules](docs/USAGE.md#drift-rules--thresholds-per-dataset-object-and-field).
+
+---
+
+## It tells you what to do next
+
+The **Action Plan** turns every finding — drift, expected-schema failures, PII, orphans, mixed types, stale data,
+AI suggestions — into one action with the evidence, why it matters, the affected fields and a copy-ready fix.
+Related findings are merged (the rename explains "required field missing"), priorities come from severity and
+breadth, and you can tick items off and export the plan as CSV, Markdown or JSON.
+
+![Action Plan](docs/images/action-plan.png)
+
+---
+
+## Bring your own schema (BYOS)
+
+Tell Datalens what the data *should* look like with a JSON Schema — required fields, types, enums, ranges,
+patterns — and put thresholds right next to the fields:
+
+```json
+{"title": "orders", "type": "object", "required": ["id", "title"],
+ "x-datalens": {"defaults": {"coverage": {"change_pct": 20}}},
+ "properties": {
+   "id":      {"type": "string", "x-datalens": {"coverage": {"drop_pct": 5}}},
+   "title":   {"type": "string", "x-datalens": {"coverage": {"drop_pct": 10}}},
+   "country": {"type": "string", "x-datalens": {"coverage": {"change_pct": 20}}}}}
+```
+
+```bash
+datalens schema infer -s file -p data/ -o expected.json     # no schema yet? learn one from a good load, then edit it
+datalens analyze -s file -p data/ --schema expected.json --detect-drift
+```
+
+Failures show up in **Health → Expected Schema**, in the Action Plan, in the health score and in the CI exit code.
+
+![Expected schema](docs/images/expected-schema.png)
+
+---
+
+## Every number explains itself
+
+Hover any ⓘ for what a metric means and how it's calculated. **Verdict → How scores work** shows this run's
+health score step by step and the DQI of every object and dimension with its weight. The same definitions are in
+[docs/METRICS.md](docs/METRICS.md) and in the terminal (`datalens glossary dqi`), generated from the code's own
+constants so they can't disagree.
+
+| Score | In one line |
+|---|---|
+| **Health** | DQI minus penalties for high-risk PII, drift, expected-schema failures and mixed types |
+| **DQI** | weighted mean of the dimensions below, per object; overall = mean of objects |
+| Completeness (0.30) | share of rows with a non-empty value; nested fields measured against their parent |
+| Consistency (0.25) | share of non-null values with the field's main type |
+| Uniqueness (0.20) | does each object have a unique identifier? |
+| Validity (0.25) | penalises placeholder-like constant text and mostly-empty fields |
+| Timeliness (0.10) | age of the newest record (100 = today) |
+| Granularity (0.10) | fields with useful cardinality (not constant, not unique free text) |
+| Accuracy (0.15) | how consistently values follow their field's dominant pattern |
+
+![How scores work](docs/images/how-scores-work.png)
+
+![Glossary with filter and expand/collapse all](docs/images/glossary.png)
+
+---
+
+## Wire it into CI/CD
+
+Everything in the report is available from the CLI:
+
+```bash
+datalens analyze --cc nightly_export -o output --version-tag "$(date +%F)" --run-date "$(date +%F)" \
+  --compare-to rolling --schema expected.json \
+  --fail-on fail --min-score health=70,dqi=85 --max-drop dqi=5 \
+  --notify "slack:$SLACK_WEBHOOK" --format json > summary.json
+```
+
+Exit codes: `0` ok · `1` warnings (with `--fail-on warn`) · `2` breach or failed gate · `3` error.
+Also: `datalens scores`, `datalens drift` (re-check from history without reading data), `datalens history list`.
+A ready GitHub Actions workflow is in [`examples/scenarios/08-ci-gate`](examples/scenarios/08-ci-gate/README.md).
+
+---
+
+## AI review and chat
+
+Datalens is fully useful offline. Add `--ai claude` (logged-in Claude CLI), `anthropic`, `openai`, `cursor` or
+`copilot` (the model is `auto` unless you pin one with `--ai-model`; a rejected model falls back to auto) and a
+model reviews the findings — schema, keys, orphans, drift — and adds domain-aware recommendations
+to the Action Plan, marked **AI** — shown as scannable finding cards (gist, highlighted numbers, details on
+demand) in **Verdict → AI Review**. No sample values are sent; PII fields are flagged as masked.
+
+Then ask follow-up questions:
+
+```bash
+datalens serve output/demo/day2_day2      # report + chat on http://127.0.0.1:8765
+datalens ask "Which bowler ids are orphaned most often?" output/demo/day2_day2
+```
+
+The model can run **read-only SQL on a PII-masked sample** of the data; every query is shown with the answer.
+Answers can be downloaded (CSV/Markdown), added to the Action Plan, or the whole session exported. Localhost
+only, per-session token, and the report file is never changed.
+
+![AI Review](docs/images/ai-insights.png)
+
+![Chat with a run](docs/images/chat.png)
+
+---
+
+## Coming from variety.js?
+
+`variety.js` tells you which keys exist, with which types, in what share of documents. That's where Datalens starts:
+
+| | variety.js | Datalens |
+|---|---|---|
+| Keys, types, occurrence % (nested, arrays) | ✅ | ✅ |
+| Value distributions and examples | – | ✅ |
+| Quality scores with visible formulas | – | ✅ |
+| PII detection and masking | – | ✅ |
+| Primary keys, foreign keys and orphans across collections | – | ✅ |
+| Drift vs yesterday, a baseline, or a learned normal range | – | ✅ |
+| Expected-schema (BYOS) checks | – | ✅ |
+| Prioritised action plan, CI exit codes, notifications | – | ✅ |
+| AI review and chat over the data | – | ✅ |
+
+```bash
+datalens analyze --source mongodb --uri "$MONGO_URI" --db shop --collections orders,customers --detect-drift
+datalens analyze --source bigquery --project my-proj --dataset shop --tables orders,customers --detect-drift
+```
+
+---
+
+## Install
+
+```bash
 git clone https://github.com/m8d8/datalens.ai.git
-cd datalens
-
-# Install with uv (recommended) or pip
-uv sync
-# or
-pip install -e .
+cd datalens.ai
+uv sync                      # or: pip install -e .
+uv sync --extra ai           # optional: Anthropic / OpenAI SDKs (CLI logins need nothing extra)
+uv sync --extra bigquery     # optional: Google BigQuery connector
+uv sync --extra dev          # tests: uv run pytest
 ```
 
-### Option 1: Direct CLI (quick one-off analysis)
+Quick start on your own file:
+
 ```bash
-# Analyze a local file — opens a self-contained HTML report
 uv run datalens analyze --source file --path data.csv --out-dir output
-
-# Analyze MongoDB collections
-uv run datalens analyze --source mongodb --db mydb \
-  --collections users,orders --uri "mongodb://localhost:27017"
 ```
 
-### Option 2: Connection Configs (reusable, recommended for teams)
-```bash
-# Create a connection config once
-mkdir -p .datalens/connections
-cat > .datalens/connections/my_api.yaml << 'EOF'
-name: my_api
-source_type: http
-params:
-  uri: "https://api.example.com/v1"
-  auth_type: bearer
-  auth_token: "${API_TOKEN}"
-EOF
+Each run writes to `output/<source>_<tag>/`: the HTML report, a run summary (JSON), the drift report and
+expected-schema check (when used), the masked schema JSON, a markdown summary and, with `--ai`, the AI review.
+Reusable connections with secrets kept out of git: [Connection Config Guide](docs/CONNECTION_CONFIG.md).
 
-# Create secrets file (git-ignored)
-cat > .datalens/secrets.yaml << 'EOF'
-# Keep actual credentials here (git-ignored)
-http:
-  default_headers:
-    Authorization: "Bearer your_actual_token"
-EOF
+Library use:
 
-# Use it anytime (no more typing credentials!)
-# Datalens auto-loads secrets from .datalens/secrets.yaml
-uv run datalens analyze --cc my_api
-uv run datalens connection-list --verbose
+```python
+from datalens import analyze
+
+result = analyze({"source": "file", "path": "data.csv"})
+result.decision["health_verdict"]   # {'status': 'attention', 'score': 79.2, 'drivers': [...], 'penalties': {...}}
+result.decision["next_steps"]       # every action with evidence and fix
+result.drift_report                 # when a reference run is given
 ```
 
-Each run writes three files to a structured output directory:
-- `{source}_{timestamp}/{source}-datalens-report.html` — the interactive report (open in any browser)
-- `{source}_{timestamp}/{source}-datalens-schema.json` — machine-readable schema
-- `{source}_{timestamp}/{source}-datalens-summary.md` — markdown summary
+---
 
-👉 **New here? Start with the [Quick Start Guide](docs/QUICKSTART.md).**  
-👉 **Want reusable configs? See the [Connection Config Guide](docs/CONNECTION_CONFIG.md) and [examples](examples/connection-configs/).**
+## Examples for every scenario
+
+| | Scenario |
+|---|---|
+| 01 | [Profile one file](examples/scenarios/01-quickstart-single-file/README.md) |
+| 02 | [Several related entities — keys, foreign keys, orphans](examples/scenarios/02-multi-entity-directory/README.md) |
+| 03 | [What changed since yesterday?](examples/scenarios/03-day-over-day-drift/README.md) |
+| 04 | [Compare with a fixed baseline](examples/scenarios/04-fixed-baseline/README.md) |
+| 05 | [Daily drift with a learned baseline](examples/scenarios/05-rolling-daily-baseline/README.md) |
+| 06 | [Custom thresholds per dataset, object and field](examples/scenarios/06-custom-drift-rules/README.md) |
+| 07 | [BYOS — expected JSON Schema](examples/scenarios/07-byos-expected-schema/README.md) |
+| 08 | [CI gate + notifications (GitHub Actions, cron)](examples/scenarios/08-ci-gate/README.md) |
+| 09 | [AI review](examples/scenarios/09-ai-insights/README.md) |
+| 10 | [MongoDB, coming from variety.js](examples/scenarios/10-mongodb-beyond-variety/README.md) |
+| 11 | [PII controls](examples/scenarios/11-pii-controls/README.md) |
+| 12 | [History and re-scoring past runs](examples/scenarios/12-history-and-rescoring/README.md) |
+
+Reproduce every run and screenshot in this README: `AI=claude bash examples/demo/run_demo.sh`.
 
 ---
 
@@ -116,72 +275,24 @@ Each run writes three files to a structured output directory:
 
 | Guide | What it covers |
 |---|---|
-| 📘 [Quick Start](docs/QUICKSTART.md) | Install and produce your first report in under 5 minutes. |
-| 🛠️ [Usage Guide](docs/USAGE.md) | Every CLI flag, all source types, drift detection, config & secrets, library and CI usage. |
-| 📊 [Report Guide](docs/REPORT_GUIDE.md) | A tour of every report section — what it means and how to use it to make decisions. |
-| 🔐 [Connection Config Guide](docs/CONNECTION_CONFIG.md) | Store & reuse credentials with YAML configs. Support for HTTP APIs, MongoDB, S3, local files with environment variable substitution. |
-| 🤖 [AI Providers Guide](docs/AI_PROVIDERS.md) | Configure Claude Desktop, GitHub Copilot, Anthropic API, OpenAI, or Cursor for AI-powered insights. Choose models for Anthropic. |
-| 📋 [Connection Config Examples](examples/connection-configs/README.md) | Ready-to-use examples for all source types (HTTP Bearer/Basic/API Key, MongoDB Atlas/Local, S3, CSV/JSON/Excel/XML). |
-| 🤝 [Contributing](CONTRIBUTING.md) | Add a new connector via the `Connector` interface. |
+| 📘 [Quick Start](docs/QUICKSTART.md) | First report in under 5 minutes. |
+| 🛠️ [Usage Guide](docs/USAGE.md) | Every flag and command, drift modes and rules, BYOS, CI/CD, chat, library use. |
+| 📊 [Report Guide](docs/REPORT_GUIDE.md) | Every tab and how to act on it. |
+| 🧮 [Metrics](docs/METRICS.md) | Every score and check: what, when, and the exact formula. |
+| 🔐 [Connection Config Guide](docs/CONNECTION_CONFIG.md) | Reusable connections with env-var secrets. |
+| 🤖 [AI Providers](docs/AI_PROVIDERS.md) | Claude / Copilot / Cursor logins, Anthropic and OpenAI keys. |
+| 🤝 [Contributing](CONTRIBUTING.md) | Add a connector via the `Connector` interface. |
 
 ---
 
-## CLI at a glance
+## Data attribution
 
-```bash
-datalens analyze --source <file|mongodb|s3|http> [OPTIONS]
-```
-
-Common options: `--path`, `--db`, `--collections`, `--object`, `--uri`, `--sample-size`,
-`--max-depth`, `--max-distinct`, `--out-dir`, `--version-tag`, `--detect-drift`,
-`--compare-to`, `--ai`, `--mask-pii/--no-mask-pii`. See the [Usage Guide](docs/USAGE.md) for the full reference.
-
----
-
-## Schema Drift in 30 seconds
-
-```bash
-# First run = baseline (saved to <out-dir>/.history)
-datalens analyze --source mongodb --db mydb --collections users,orders \
-  --out-dir output/mydb --version-tag baseline
-
-# Later run = drift vs. the most recent previous run → see the Trends & Drift tab
-datalens analyze --source mongodb --db mydb --collections users,orders \
-  --out-dir output/mydb --detect-drift
-```
-
-Use the **same `--out-dir`** so runs share a history. Because object names (e.g. `users`, `orders`) are stable, you get field-level, type, and coverage drift — not just object add/remove.
-
-`--detect-drift` compares against the **most recent previous run** (rolling); use `--compare-to <tag>` to compare against a **fixed baseline** instead. See [Usage → How drift comparison works](docs/USAGE.md#how-drift-comparison-works-rolling-vs-baseline).
-
----
-
-## Library usage
-
-```python
-from datalens import analyze
-
-result = analyze(
-    source_spec={"source": "file", "path": "data.csv"},
-    config=None,  # defaults
-)
-
-print(result.total_fields)
-print(result.decision["health_verdict"])     # {'status': 'attention', 'score': 79.2, ...}
-print(result.decision["compliance_scorecard"]["risk"])
-
-with open("report.html", "w") as f:
-    f.write(result.html_report)
-```
-
-See the [Usage Guide](docs/USAGE.md#library-usage) for drift, custom config, and the full `AnalysisResult` shape.
-
----
+The demo data in `test_data/cricket/` is derived from [Cricsheet](https://cricsheet.org), available under the
+[Open Data Commons Attribution License](http://opendatacommons.org/licenses/by/1.0/). Day 2 and the last daily
+load contain deliberately injected problems and synthetic email addresses — see
+[`test_data/cricket/ATTRIBUTION.md`](test_data/cricket/ATTRIBUTION.md). Regenerate with
+`python examples/demo/build_demo_data.py`.
 
 ## License
 
 MIT License — see [LICENSE](LICENSE).
-
----
-
-**Datalens.ai** — Schema analysis that learns from your data, and tells you what to do next.

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from datalens.ai.base import AIProvider
+from datalens.ai.base import AIProvider, is_model_error
 from datalens.ai.context import build_analysis_context
 from datalens.ai.prompt import build_cli_prompt
 from datalens.ai.providers._cli import cli_status_ok, find_executable, run_cli_prompt
@@ -33,7 +33,7 @@ class CursorLoginProvider(AIProvider):
             or cursor_cfg.get("api_key")
         )
         self._cli_path = cursor_cfg.get("cli_path") or os.environ.get("DATALENS_CURSOR_CLI")
-        self._model = cursor_cfg.get("model") or os.environ.get("DATALENS_CURSOR_MODEL", "composer-2.5")
+        self._model = self.resolve_model(cursor_cfg.get("model"), "DATALENS_CURSOR_MODEL")
         self._timeout = int(cursor_cfg.get("timeout", 180))
 
     @property
@@ -77,17 +77,7 @@ class CursorLoginProvider(AIProvider):
             )
 
         prompt = build_cli_prompt(ctx)
-        cmd = [
-            cli,
-            "-p",
-            prompt,
-            "--output-format",
-            "text",
-        ]
-        if self._model:
-            cmd.extend(["--model", self._model])
-
-        ok, stdout, stderr = run_cli_prompt(cmd, timeout=self._timeout)
+        ok, stdout, stderr = self._run_cli(prompt)
         if not ok:
             return {
                 "enabled": False,
@@ -100,7 +90,7 @@ class CursorLoginProvider(AIProvider):
         return normalize_insights_payload(
             parsed,
             provider=self.name,
-            model=self._model,
+            model=self.display_model,
             auth_mode="license",
             raw_response=stdout,
         )
@@ -114,8 +104,8 @@ class CursorLoginProvider(AIProvider):
                 prompt,
                 AgentOptions(
                     api_key=self._api_key,
-                    model=self._model,
                     local=LocalAgentOptions(cwd=os.getcwd()),
+                    **({"model": self._model} if self._model else {}),  # auto: SDK default
                 ),
             )
             text = getattr(result, "result", None) or getattr(result, "text", "") or str(result)
@@ -123,7 +113,7 @@ class CursorLoginProvider(AIProvider):
             return normalize_insights_payload(
                 parsed,
                 provider=self.name,
-                model=self._model,
+                model=self.display_model,
                 auth_mode="api_key",
                 raw_response=text,
             )
@@ -134,6 +124,31 @@ class CursorLoginProvider(AIProvider):
                 "auth_mode": "api_key",
                 "error": str(e),
             }
+
+    @property
+    def display_model(self) -> str:
+        return self._model or "auto"
+
+    def _run_cli(self, text: str, *, cwd: str | None = None) -> tuple[bool, str, str]:
+        """cursor-agent with the configured model (if any); a rejected model is retried on auto."""
+        base = [self._resolve_cli(), "-p", text, "--output-format", "text"]
+        if self._model:
+            ok, out, err = run_cli_prompt(base + ["--model", self._model], timeout=self._timeout, cwd=cwd)
+            if ok or not is_model_error(f"{err} {out}"):
+                return ok, out, err
+            self.note_model_fallback(self._model, err or out)
+            self._model = None
+        return run_cli_prompt(base, timeout=self._timeout, cwd=cwd)
+
+    def complete(self, prompt: str, *, system: str | None = None, max_tokens: int = 2048) -> tuple[bool, str]:
+        import tempfile
+
+        text = f"{system}\n\n{prompt}" if system else prompt
+        if not self._cli_logged_in():
+            return False, "Cursor chat needs a logged-in cursor-agent (`cursor-agent login`)"
+        with tempfile.TemporaryDirectory(prefix="datalens-chat-") as sandbox:
+            ok, stdout, stderr = self._run_cli(text, cwd=sandbox)
+        return (True, stdout) if ok else (False, stderr or "cursor-agent failed")
 
     def generate_insights(
         self,
