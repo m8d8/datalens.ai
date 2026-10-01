@@ -80,12 +80,12 @@ datalens analyze --cc my_api --ai claude
 
 ---
 
-### GitHub Copilot (License via gh CLI)
+### GitHub Copilot (License via the Copilot CLI)
 
-**What you need:**
-- GitHub CLI (`gh`) installed — [Install gh](https://cli.github.com/)
-- GitHub account and Copilot subscription active
-- Authenticated: `gh auth login`
+**What you need** (one of):
+- **Copilot CLI (preferred):** `npm i -g @github/copilot`, then run `copilot` once and log in.
+- **GitHub CLI fallback:** `gh` with `gh auth login` and the Copilot extension.
+- An active Copilot subscription either way.
 
 **Enable AI insights:**
 ```bash
@@ -93,24 +93,29 @@ datalens analyze --source file --path data.csv --ai copilot
 ```
 
 **How it works:**
-- Datalens invokes `gh copilot` with your analysis context
-- GitHub's Copilot service processes the request (typically uses GPT-4)
-- Your Copilot subscription covers the cost
-- No separate API keys needed
+- Datalens runs `copilot -p "<prompt>" -s --model auto --no-ask-user --no-custom-instructions`
+  (or `gh copilot -p` when only `gh` is installed).
+- The CLI runs in an empty temporary folder, so it can only answer: it can't read or change your files.
+- Your Copilot subscription covers the cost. No API keys needed.
+- Model: **auto** by default (Copilot picks). Set `--ai-model <id>` to choose one; `gh copilot` ignores it.
 
 **Verify it's available:**
 ```bash
-# Check GitHub authentication
-gh auth status
+copilot --version            # Copilot CLI
+# or, for the gh fallback:
+gh auth status && gh copilot status
+```
 
-# Check Copilot is available
-gh copilot status
-# Should show: Copilot service: OK
+**secrets.yaml (optional):**
+```yaml
+copilot:
+  cli_path: /opt/homebrew/bin/copilot   # if not on PATH
+  model: auto
+  timeout: 300
 ```
 
 **In connection configs:**
 ```bash
-# Same as Claude — just change the --ai flag
 datalens analyze --cc my_api --ai copilot
 ```
 
@@ -176,12 +181,12 @@ datalens analyze --cc my_api --ai claude
 
 ---
 
-### GitHub Copilot (License via gh CLI)
+### GitHub Copilot (License via the Copilot CLI)
 
-**What you need:**
-- GitHub CLI (`gh`) installed — [Install gh](https://cli.github.com/)
-- GitHub account and Copilot subscription active
-- Authenticated: `gh auth login`
+**What you need** (one of):
+- **Copilot CLI (preferred):** `npm i -g @github/copilot`, then run `copilot` once and log in.
+- **GitHub CLI fallback:** `gh` with `gh auth login` and the Copilot extension.
+- An active Copilot subscription either way.
 
 **Enable AI insights:**
 ```bash
@@ -189,24 +194,29 @@ datalens analyze --source file --path data.csv --ai copilot
 ```
 
 **How it works:**
-- Datalens invokes `gh copilot` with your analysis context
-- GitHub's Copilot service processes the request (typically uses GPT-4)
-- Your Copilot subscription covers the cost
-- No separate API keys needed
+- Datalens runs `copilot -p "<prompt>" -s --model auto --no-ask-user --no-custom-instructions`
+  (or `gh copilot -p` when only `gh` is installed).
+- The CLI runs in an empty temporary folder, so it can only answer: it can't read or change your files.
+- Your Copilot subscription covers the cost. No API keys needed.
+- Model: **auto** by default (Copilot picks). Set `--ai-model <id>` to choose one; `gh copilot` ignores it.
 
 **Verify it's available:**
 ```bash
-# Check GitHub authentication
-gh auth status
+copilot --version            # Copilot CLI
+# or, for the gh fallback:
+gh auth status && gh copilot status
+```
 
-# Check Copilot is available
-gh copilot status
-# Should show: Copilot service: OK
+**secrets.yaml (optional):**
+```yaml
+copilot:
+  cli_path: /opt/homebrew/bin/copilot   # if not on PATH
+  model: auto
+  timeout: 300
 ```
 
 **In connection configs:**
 ```bash
-# Same as Claude — just change the --ai flag
 datalens analyze --cc my_api --ai copilot
 ```
 
@@ -307,7 +317,7 @@ datalens analyze --source file --path data.csv --ai cursor
 
 Every provider defaults to **auto**, and the report shows the model that was used.
 
-- **Claude / Cursor / Copilot CLIs:** no model flag is passed, so each CLI uses your account's default.
+- **Claude / Cursor / Copilot CLIs:** `--model auto` (or no flag), so each CLI uses your account's default.
 - **Anthropic API:** the newest Sonnet model the key can use.
 - **OpenAI API:** its default chat model.
 
@@ -317,7 +327,7 @@ Precedence: CLI/app config → provider secret → `DATALENS_<PROVIDER>_MODEL` e
 **Wrong model?** If the provider rejects the configured model (unknown, unavailable, no access), Datalens logs a
 warning, retries the same request on **auto**, and says so in the run warnings and at the top of the AI Review tab
 ("Configured model 'x' was rejected … switched to auto"). The run never fails because of a model name.
-`gh copilot` doesn't accept a model option, so a configured one is noted and ignored.
+The standalone `copilot` CLI accepts `--model`; `gh copilot` doesn't, so a configured model is noted and ignored there.
 
 ## Auto-detect (Recommended)
 
@@ -421,6 +431,10 @@ claude --version
 ### "GitHub Copilot not available"
 
 ```bash
+# Copilot CLI installed and logged in?
+copilot --version            # install: npm i -g @github/copilot, then run `copilot` to log in
+
+# Or the gh fallback:
 # Check GitHub CLI is installed and authenticated
 gh auth status
 

@@ -80,3 +80,16 @@ def test_change_summary_lists_every_breach_and_counts_match(tmp_path):
     for f in after.drift_report["findings"]:
         assert escape(_short_message(f)) in html
         assert f'data-object="{escape(f.get("object") or "(dataset)")}"' in html
+
+
+def test_dqi_dial_arc_matches_score():
+    import math
+    import re
+
+    from datalens.report.html_report import _render_dqi_dial
+
+    out = _render_dqi_dial(94.0)
+    assert 'aria-label="Overall Data Quality Index 94.0 out of 100, grade A"' in out
+    filled, total = map(float, re.search(r'stroke-dasharray="([\d.]+) ([\d.]+)"', out).groups())
+    assert math.isclose(filled / total, 0.94, abs_tol=0.001)
+    assert ">94.0<" in out and ">DQI" in out

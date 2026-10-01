@@ -1,6 +1,6 @@
 # What changed since yesterday?
 
-Save a baseline run, then compare the next load with it. Day 2 of the cricket demo carries 10 deliberate changes — see which ones Datalens catches.
+Save a baseline run, then compare the next load with it. Day 2 of the cricket demo carries 13 deliberate changes — see which ones Datalens catches.
 
 ## Run
 

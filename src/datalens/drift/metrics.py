@@ -48,8 +48,10 @@ def object_rows(obj: dict[str, Any]) -> int:
 
 
 def field_coverage(field: dict[str, Any], sampled: int) -> float:
-    effective = max(0, field.get("presence_count", 0) - field.get("null_empty_count", 0))
-    return effective / sampled * 100 if sampled else 0.0
+    """True coverage (see datalens.profiling.coverage)."""
+    from datalens.profiling.coverage import coverage_pct
+
+    return coverage_pct(field, sampled)
 
 
 def extract_metrics(

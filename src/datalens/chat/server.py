@@ -21,14 +21,27 @@ from datalens.chat.workspace import RunWorkspace
 
 CHAT_UI = r"""
 <style>
+#dl-chat-off, #dl-chat-off-pop { display:none !important; }
 #dl-chat-btn { position:fixed; right:22px; bottom:22px; z-index:1000; border:0; border-radius:999px; padding:12px 18px;
-  background:var(--accent-gradient); color:#fff; font:600 .95rem var(--font-sans); cursor:pointer; box-shadow:var(--shadow-md); }
+  background:var(--accent-gradient); color:#fff; font:600 .95rem var(--font-sans); cursor:pointer;
+  display:inline-flex; align-items:center; gap:8px; box-shadow:0 8px 24px -8px rgba(124,58,237,.55); }
+#dl-chat-btn:hover { filter:brightness(1.08); }
+#dl-chat-btn svg { width:18px; height:18px; }
 #dl-chat { position:fixed; right:22px; bottom:78px; width:min(520px, calc(100vw - 32px)); height:min(680px, calc(100vh - 110px));
-  z-index:1000; display:none; flex-direction:column; background:var(--bg-card); color:var(--text-primary);
-  border:1px solid var(--border-secondary); border-radius:var(--radius-lg); box-shadow:var(--shadow-md); }
-#dl-chat.open { display:flex; }
-#dl-chat header { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border-primary); }
-#dl-chat header b { flex:1; }
+  z-index:1000; display:none; flex-direction:column; color:var(--text-primary); overflow:hidden;
+  /* gradient border: card fill on the padding box, accent gradient showing through a transparent border */
+  border:2px solid transparent; border-radius:var(--radius-lg);
+  background:linear-gradient(var(--bg-card), var(--bg-card)) padding-box, var(--accent-gradient) border-box;
+  box-shadow:0 0 0 4px rgba(124,58,237,.10), 0 18px 48px -14px rgba(79,70,229,.45); }
+#dl-chat.open { display:flex; animation:dl-chat-in .18s ease-out; }
+@keyframes dl-chat-in { from { opacity:0; transform:translateY(8px) scale(.98); } to { opacity:1; transform:none; } }
+@media (prefers-reduced-motion: reduce) { #dl-chat.open { animation:none; } }
+#dl-chat header { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border-primary);
+  background:linear-gradient(135deg, rgba(59,130,246,.10), rgba(139,92,246,.12)); }
+#dl-chat header b { flex:none; display:inline-flex; align-items:center; gap:8px; font-size:1rem; white-space:nowrap; }
+#dl-chat header #dl-chat-provider { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#dl-chat header .dl-btn { flex:none; white-space:nowrap; }
+#dl-chat .spark { width:24px; height:24px; flex:none; filter:drop-shadow(0 1px 3px rgba(124,58,237,.35)); }
 #dl-chat .msgs { flex:1; overflow:auto; padding:12px 14px; font-size:.88rem; line-height:1.55; }
 #dl-chat .m { margin-bottom:14px; }
 #dl-chat .m.user { text-align:right; }
@@ -44,9 +57,18 @@ CHAT_UI = r"""
 #dl-chat .hint { color:var(--text-tertiary); font-size:.78rem; }
 #dl-chat .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
 </style>
-<button id="dl-chat-btn" type="button" aria-controls="dl-chat">💬 Ask Datalens</button>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <linearGradient id="dl-spark-grad" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#3b82f6"/><stop offset=".55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#ec4899"/>
+  </linearGradient>
+  <symbol id="dl-spark" viewBox="0 0 24 24">
+    <path d="M10 2.5c.5 4.6 2.4 6.5 7 7-4.6.5-6.5 2.4-7 7-.5-4.6-2.4-6.5-7-7 4.6-.5 6.5-2.4 7-7z"/>
+    <path d="M18.5 13.5c.25 2.3 1.2 3.25 3.5 3.5-2.3.25-3.25 1.2-3.5 3.5-.25-2.3-1.2-3.25-3.5-3.5 2.3-.25 3.25-1.2 3.5-3.5z"/>
+    <circle cx="19" cy="5" r="1.4"/>
+  </symbol></defs></svg>
+<button id="dl-chat-btn" type="button" aria-controls="dl-chat"><svg fill="currentColor" aria-hidden="true"><use href="#dl-spark"/></svg>Ask Datalens</button>
 <section id="dl-chat" aria-label="Ask Datalens">
-  <header><b>Ask Datalens</b><span class="hint" id="dl-chat-provider"></span>
+  <header><b><svg class="spark" fill="url(#dl-spark-grad)" aria-hidden="true"><use href="#dl-spark"/></svg>Ask Datalens</b><span class="hint" id="dl-chat-provider"></span>
     <button class="dl-btn" type="button" id="dl-chat-export">Export chat</button>
     <button class="dl-btn" type="button" id="dl-chat-close" aria-label="Close">✕</button></header>
   <div class="msgs" id="dl-chat-msgs">
@@ -61,8 +83,10 @@ CHAT_UI = r"""
   var cfg = window.DATALENS_CHAT || {}; var history = []; var transcript = [];
   var panel = document.getElementById('dl-chat'), msgs = document.getElementById('dl-chat-msgs');
   document.getElementById('dl-chat-btn').onclick = function(){ panel.classList.toggle('open'); document.getElementById('dl-chat-q').focus(); };
+  document.addEventListener('click', function(ev){ var h = ev.target.closest && ev.target.closest('[data-dl-chat-help]');
+    if (h) { ev.preventDefault(); ev.stopImmediatePropagation(); panel.classList.add('open'); document.getElementById('dl-chat-q').focus(); } }, true);
   document.getElementById('dl-chat-close').onclick = function(){ panel.classList.remove('open'); };
-  document.getElementById('dl-chat-provider').textContent = cfg.provider ? '· ' + cfg.provider + (cfg.sql ? ' · SQL on sample' : ' · findings only') : '';
+  var provEl = document.getElementById('dl-chat-provider'); provEl.title = cfg.provider || ''; provEl.textContent = cfg.provider ? '· ' + cfg.provider + (cfg.sql ? ' · SQL on sample' : ' · findings only') : '';
   ['What should I fix first, and why?', 'Explain the biggest drift finding with numbers', 'Show the 10 most frequent values of the field that drifted most']
     .forEach(function(q){ var b = document.createElement('button'); b.type = 'button'; b.className = 'dl-btn'; b.textContent = q;
       b.onclick = function(){ send(q); }; document.getElementById('dl-chat-chips').appendChild(b); });
@@ -211,6 +235,7 @@ def serve(ws: RunWorkspace, provider: Any, *, port: int = 8765) -> tuple[Threadi
     """Create the server (caller runs serve_forever). Returns (server, url)."""
     token = secrets.token_urlsafe(24)
     session = ChatSession(ws, provider)
-    handler = make_handler(ws, session, token, provider.name, port)
+    label = f"{provider.name} · {getattr(provider, 'display_model', 'auto')}"
+    handler = make_handler(ws, session, token, label, port)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     return server, f"http://127.0.0.1:{port}/"

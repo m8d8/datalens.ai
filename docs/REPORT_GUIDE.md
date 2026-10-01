@@ -99,7 +99,7 @@ What sensitive data exists and how exposed you are.
 
 The workhorse tab: every field, fully searchable and sortable.
 
-Columns: object, field path, coverage %, null/empty %, type distribution (multi-type badge), distinct count, cardinality, example values, and a PII badge where relevant.
+Columns: object, field path, **coverage %** (true coverage: missing, null and empty values all count against it — the same number as the Coverage heat map and drift tables), null/empty % (rows where the key exists but holds nothing), type distribution (multi-type badge), distinct count, cardinality, example values, and a PII badge where relevant.
 
 - **Object filter** — narrow to one or more collections/tables.
 - **Distinct modal** — click a distinct count to see the value distribution.
@@ -111,7 +111,7 @@ Columns: object, field path, coverage %, null/empty %, type distribution (multi-
 
 ## Tab 6 — Coverage 🔬
 
-A field × object **heat map** colored by coverage % (green 90%+ → red 0–25%).
+A field × object **heat map** of true coverage % in five soft bands (90–100 · 75–90 · 50–75 · 25–50 · 0–25), the same bands as the Field Explorer.
 
 **How to use it:** spot at a glance which fields are universally present (good join/identity candidates) and which are object-specific or sparse. A column of red usually means an optional or broken upstream field.
 

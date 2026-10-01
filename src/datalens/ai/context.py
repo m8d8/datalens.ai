@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from datalens.profiling.coverage import coverage_pct
+
 
 def build_analysis_context(
     schema_json: dict[str, Any],
@@ -46,16 +48,14 @@ def summarize_schema_for_prompt(objects: list[dict[str, Any]], *, max_fields: in
         for field in fields[:max_fields]:
             path = field.get("path", "")
             types = ", ".join(field.get("types", {}).keys())
-            present = field.get("presence_count", 0)
-            present_pct = present / max(sampled, 1) * 100
-            filled_pct = max(0, present - field.get("null_empty_count", 0)) / max(sampled, 1) * 100
+            filled_pct = coverage_pct(field, sampled)
             distinct = field.get("distinct_count_in_sample", "?")
             if field.get("distinct_is_exact") is False:
                 distinct = f">={distinct}"
             masked = " (PII, values masked)" if field.get("masked") else ""
             lines.append(
-                f"- {path}: types=[{types}], key present={present_pct:.0f}%, "
-                f"non-empty={filled_pct:.0f}%, distinct={distinct}{masked}"
+                f"- {path}: types=[{types}], coverage={filled_pct:.0f}% (missing/null/empty excluded), "
+                f"distinct={distinct}{masked}"
             )
         if len(fields) > max_fields:
             lines.append(f"- ... and {len(fields) - max_fields} more fields")

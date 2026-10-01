@@ -305,6 +305,25 @@ def cli() -> None:
     help="YAML file with drift rules (a 'drift:' section, or the rules themselves).",
 )
 @click.option(
+    "--coverage-drop",
+    type=float,
+    default=None,
+    help="Global rule: coverage decrease (relative %) that counts as a breach (default 25).",
+)
+@click.option(
+    "--coverage-increase",
+    type=float,
+    default=None,
+    help="Global rule: coverage increase (relative %) that counts as a breach (default 50).",
+)
+@click.option(
+    "--field-coverage-rule",
+    "field_coverage_rules",
+    multiple=True,
+    help='Per-field coverage rule, relative %: "OBJECT.FIELD=drop:5,increase:30" or "OBJECT.FIELD=change:20" '
+    "(repeatable; wildcards allowed).",
+)
+@click.option(
     "--schema",
     "expected_schemas",
     multiple=True,
@@ -439,6 +458,9 @@ def analyze_cmd(
     detect_drift: bool,
     run_date: str | None,
     drift_rules: str | None,
+    coverage_drop: float | None,
+    coverage_increase: float | None,
+    field_coverage_rules: tuple[str, ...],
     expected_schemas: tuple[str, ...],
     fail_on: str,
     min_score: str | None,
@@ -606,6 +628,7 @@ def analyze_cmd(
 
         # Drift rules: app config ← connection config 'drift' ← --drift-rules file.
         config.drift = _merge_drift_rules(config.drift, conn_drift, drift_rules)
+        config.drift = _apply_coverage_flags(config.drift, coverage_drop, coverage_increase, field_coverage_rules)
         if expected_schemas:
             config.expected_schemas = list(expected_schemas)
         elif conn_schema:
@@ -871,6 +894,35 @@ def _resolve_drift_mode(compare_to: str | None, detect_drift: bool, drift_cfg: d
     if detect_drift:
         return _resolve_drift_mode(str((drift_cfg or {}).get("compare_to") or "previous"), False, {})
     return None
+
+
+def _apply_coverage_flags(
+    drift_cfg: dict[str, Any], drop: float | None, increase: float | None, field_rules: tuple[str, ...]
+) -> dict[str, Any]:
+    """CLI coverage flags → drift rules (flags win over config files)."""
+    from datalens.drift.rules import BUILTIN_DEFAULTS, _merge
+
+    cfg = dict(drift_cfg or {})
+    if drop is not None or increase is not None:
+        current = dict(((cfg.get("defaults") or {}).get("coverage")) or BUILTIN_DEFAULTS["coverage"])
+        if drop is not None:
+            current["drop_pct"] = drop
+        if increase is not None:
+            current["increase_pct"] = increase
+        cfg = _merge(cfg, {"defaults": {"coverage": current}})
+    for spec in field_rules:
+        target, sep, body = spec.partition("=")
+        obj, dot, field = target.strip().partition(".")
+        if not sep or not dot or not field:
+            raise click.UsageError(f'Invalid --field-coverage-rule "{spec}"; use OBJECT.FIELD=drop:5,increase:30')
+        rule: dict[str, float] = {}
+        for part in body.split(","):
+            key, colon, value = part.strip().partition(":")
+            if key not in ("drop", "increase", "change") or not colon:
+                raise click.UsageError(f'Invalid --field-coverage-rule "{spec}": use drop:/increase:/change: N')
+            rule[f"{key}_pct"] = float(value)
+        cfg = _merge(cfg, {"objects": {obj: {"fields": {field: {"coverage": rule}}}}})
+    return cfg
 
 
 def _merge_drift_rules(
@@ -1313,10 +1365,13 @@ def glossary_cmd(term: str | None, markdown: bool) -> None:
 _AI_CHOICES = click.Choice(["anthropic", "openai", "cursor", "copilot", "claude", "auto"], case_sensitive=False)
 
 
-def _chat_provider(ai: str):
+def _chat_provider(ai: str, ai_model: str | None = None):
     from datalens.ai.registry import get_ai_provider
 
-    provider = get_ai_provider(load_config(ai_provider="" if ai == "auto" else ai))
+    overrides: dict[str, Any] = {"ai_provider": "" if ai == "auto" else ai}
+    if ai_model:
+        overrides["ai_model"] = ai_model
+    provider = get_ai_provider(load_config(**overrides))
     if provider.name == "noop" or not provider.is_available():
         raise click.UsageError(
             f"AI provider '{ai}' is not available. Log in to a CLI (claude / cursor-agent / gh copilot) or set "
@@ -1327,10 +1382,11 @@ def _chat_provider(ai: str):
 @cli.command("serve")
 @click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
 @click.option("--ai", default="auto", type=_AI_CHOICES, help="AI provider for chat (default: auto-detect).")
+@click.option("--ai-model", default=None, help="Model for --ai (default: auto). A rejected model falls back to auto.")
 @click.option("--port", default=8765, type=int, help="Local port (bound to 127.0.0.1 only).")
 @click.option("--sample-size", default=20000, type=int, help="Rows per object loaded for SQL questions.")
 @click.option("--no-open", is_flag=True, help="Don't open a browser.")
-def serve_cmd(run_dir: str, ai: str, port: int, sample_size: int, no_open: bool) -> None:
+def serve_cmd(run_dir: str, ai: str, ai_model: str | None, port: int, sample_size: int, no_open: bool) -> None:
     """
     Open a run's report with a chat panel: ask questions, get answers backed by
     SQL on a PII-masked sample, download them, or add them to the Action Plan.
@@ -1339,13 +1395,13 @@ def serve_cmd(run_dir: str, ai: str, port: int, sample_size: int, no_open: bool)
     from datalens.chat.server import serve
     from datalens.chat.workspace import RunWorkspace
 
-    provider = _chat_provider(ai)
+    provider = _chat_provider(ai, ai_model)
     ws = RunWorkspace(run_dir, sample_size=sample_size)
     console.print("[dim]Loading a masked sample of the data for SQL…[/dim]")
     ready = ws.connection() is not None
     server, url = serve(ws, provider, port=port)
     console.print(Panel(
-        f"Report + chat: [link={url}]{url}[/link]\nAI: [cyan]{provider.name}[/cyan] · SQL: "
+        f"Report + chat: [link={url}]{url}[/link]\nAI: [cyan]{provider.name}[/cyan] · model {escape(provider.display_model)} · SQL: "
         + (f"[green]{', '.join(ws.tables)}[/green]" if ready else f"[yellow]off[/yellow] ({escape(ws.load_error or '')})")
         + "\n[dim]Ctrl+C to stop.[/dim]", title="◆ datalens serve"))
     if not no_open:
@@ -1364,14 +1420,15 @@ def serve_cmd(run_dir: str, ai: str, port: int, sample_size: int, no_open: bool)
 @click.argument("question")
 @click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
 @click.option("--ai", default="auto", type=_AI_CHOICES, help="AI provider (default: auto-detect).")
+@click.option("--ai-model", default=None, help="Model for --ai (default: auto). A rejected model falls back to auto.")
 @click.option("--sample-size", default=20000, type=int, help="Rows per object loaded for SQL questions.")
 @click.option("--format", "output_format", type=click.Choice(["text", "json", "md"]), default="text")
-def ask_cmd(question: str, run_dir: str, ai: str, sample_size: int, output_format: str) -> None:
+def ask_cmd(question: str, run_dir: str, ai: str, ai_model: str | None, sample_size: int, output_format: str) -> None:
     """One-shot question about a run (scriptable): `datalens ask "why did health drop?" output/run_x`."""
     from datalens.chat import ChatSession, RunWorkspace, answer_to_markdown
 
     ws = RunWorkspace(run_dir, sample_size=sample_size)
-    reply = ChatSession(ws, _chat_provider(ai)).ask(question)
+    reply = ChatSession(ws, _chat_provider(ai, ai_model)).ask(question)
     if output_format == "json":
         click.echo(json.dumps(reply, indent=2, default=str))
     elif output_format == "md":

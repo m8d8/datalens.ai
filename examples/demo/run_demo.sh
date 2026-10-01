@@ -7,7 +7,7 @@ command -v datalens >/dev/null 2>&1 || datalens() { uv run --quiet datalens "$@"
 OUT=${OUT:-output/demo}
 rm -rf "$OUT"
 
-echo "== 1. Day 1 → Day 2 (10 injected changes) with an expected schema"
+echo "== 1. Day 1 → Day 2 (13 injected changes) with an expected schema"
 datalens analyze -s file -p test_data/cricket/day1 --pattern "*.jsonl.gz" -o "$OUT/day-over-day" \
   --version-tag day1 --run-date 2026-05-29 > /dev/null
 datalens analyze -s file -p test_data/cricket/day2 --pattern "*.jsonl.gz" -o "$OUT/day-over-day" \

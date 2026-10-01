@@ -49,6 +49,9 @@ INJECTED_CHANGES = [
     ("volume", "40% of deliveries rows dropped (truncated feed)", "row-count drift"),
     ("pii", "players.contact_email (synthetic, neutral-ish name)", "PII detection + masking"),
     ("orphans", "2% of deliveries.bowler_id point to unknown players", "referential-integrity drift"),
+    ("nulls", "matches.city blank in 25% of matches", "coverage drift in a second object"),
+    ("coverage_up", "matches.attendance filled for 63.2% of matches (day 1: 40%) — +58%", "coverage increase above the 50% rule"),
+    ("coverage_up", "deliveries.shot_type filled for 56% of deliveries (day 1: 50%) — +12%", "coverage increase within the rule"),
 ]
 
 
@@ -90,10 +93,25 @@ def load_register(csv_bytes: bytes) -> dict[str, dict[str, str]]:
     return {row["identifier"]: row for row in reader}
 
 
+# Optional enrichment fields present on a share of rows; day 2 fills more of them.
+# Presence is decided by a hash of the row id, so a row filled on day 1 stays filled.
+DAY1_FILL = {"shot_type": 0.50, "attendance": 0.40}
+DAY2_FILL = {"shot_type": 0.56, "attendance": 0.632}
+SHOT_TYPES = ["defended", "drive", "cut", "pull", "sweep", "flick", "glance", "lofted"]
+
+
+def _unit(key: str) -> float:
+    """Stable pseudo-random number in [0, 1) from a string."""
+    import hashlib
+
+    return int(hashlib.md5(key.encode()).hexdigest()[:8], 16) / 0x100000000
+
+
 def build_entities(
-    matches: list[dict[str, Any]], register: dict[str, dict[str, str]]
+    matches: list[dict[str, Any]], register: dict[str, dict[str, str]], fill: dict[str, float] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Normalise Cricsheet match files into matches/deliveries/players/teams/venues."""
+    fill = fill or DAY1_FILL
     match_rows, delivery_rows = [], []
     teams: dict[str, dict[str, Any]] = {}
     venues: dict[str, dict[str, Any]] = {}
@@ -169,6 +187,8 @@ def build_entities(
                 "umpire_ids": [pid(u) for u in info.get("officials", {}).get("umpires", [])],
             }
         )
+        if _unit("att" + m["_id"]) < fill["attendance"]:
+            match_rows[-1]["attendance"] = 15_000 + int(_unit("attv" + m["_id"]) * 45_000)
 
         for innings_no, innings in enumerate(m["innings"], start=1):
             batting_team_id = slug(innings["team"])
@@ -187,6 +207,8 @@ def build_entities(
                         "non_striker_id": pid(d["non_striker"]),
                         "runs": dict(d["runs"]),
                     }
+                    if _unit("shot" + row["delivery_id"]) < fill["shot_type"]:
+                        row["shot_type"] = SHOT_TYPES[int(_unit("shotv" + row["delivery_id"]) * len(SHOT_TYPES))]
                     if "extras" in d:
                         row["extras"] = d["extras"]
                     if "wickets" in d:
@@ -214,8 +236,12 @@ def inject_drift(entities: dict[str, list[dict[str, Any]]], new_match_ids: set[s
     # New venue for the newly added match day.
     new_venue_id = slug("Demo Park, Pune")
     entities["venues"].append({"venue_id": new_venue_id, "name": "Demo Park", "city": "Pune", "matches": 0})
+    # Own seeded stream, so adding this change doesn't shift the other injections.
+    city_rng = random.Random(1_000)
     for match in entities["matches"]:
         match["toss"].pop("decision", None)
+        if city_rng.random() < 0.25:
+            match["city"] = None  # venue feed stopped sending the city for some matches
         if match["match_id"] in new_match_ids:
             match["venue_id"] = new_venue_id
             entities["venues"][-1]["matches"] += 1
@@ -280,7 +306,10 @@ def build_daily_feed(
 def write_snapshot(entities: dict[str, list[dict[str, Any]]], directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for name, rows in entities.items():
-        with gzip.open(directory / f"{name}.jsonl.gz", "wt", encoding="utf-8") as f:
+        # mtime=0 and no stored filename: identical data → identical bytes (clean git diffs).
+        with open(directory / f"{name}.jsonl.gz", "wb") as raw, \
+                gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz, \
+                io.TextIOWrapper(gz, encoding="utf-8") as f:
             for row in rows:
                 f.write(json.dumps(row, separators=(",", ":")) + "\n")
         print(f"  {directory.name}/{name}.jsonl.gz: {len(rows):,} rows")
@@ -306,7 +335,7 @@ def main() -> None:
     print(f"{len(matches)} matches from {args.from_season}; day1 cutoff {cutoff}, day2 adds {match_days[-1]}")
 
     write_snapshot(build_entities(day1, register), args.out / "day1")
-    day2 = build_entities(matches, register)
+    day2 = build_entities(matches, register, DAY2_FILL)
     inject_drift(day2, new_ids, random.Random(args.seed))
     write_snapshot(day2, args.out / "day2")
 

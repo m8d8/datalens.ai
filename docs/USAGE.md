@@ -103,6 +103,8 @@ For details on creating and managing connection configs, see [Connection Config 
 | `--detect-drift` | Compute drift vs `drift.compare_to` (default: previous run) | off |
 | `--run-date` | Logical date of the data; orders history | now |
 | `--drift-rules` | YAML file with drift rules | — |
+| `--coverage-drop`, `--coverage-increase` | Global coverage rules, relative % change that is a breach | `25`, `50` |
+| `--field-coverage-rule` | Per-field coverage rule: `OBJECT.FIELD=drop:5,increase:30` (or `change:20`), repeatable | — |
 | `--schema` | Expected JSON Schema (`file.json` or `OBJECT=file.json`, repeatable) | — |
 | `--fail-on` | `never` \| `warn` \| `fail` — exit non-zero on drift / schema breaches | `never` |
 | `--min-score` | Score floors, e.g. `health=70,dqi=80` (exit 2 if below) | — |
@@ -303,6 +305,12 @@ drift:
 
 - `*_pct` = change **relative** to the old value (80% → 76% is a 5% drop); `*_pts` = **absolute** change in the
   metric's unit (80% → 76% is 4 points); `change_*` = either direction.
+- **Coverage defaults:** a decrease of ≥ 25% or an increase of ≥ 50% (relative) is a breach; moves under 1 point
+  are ignored. Quick overrides without a config file:
+  `--coverage-drop 15 --coverage-increase 40 --field-coverage-rule "orders.id=drop:5"`.
+- Health → Trends & Drift → **Coverage Shifts** lists every real coverage move with the rule that applies (and
+  its scope) and whether it fired; **Change Summary → Rules in effect** lists every rule, highlighting the ones that
+  fired.
 - A number means breach (`fail`); `{warn: x, fail: y}` gives two levels; `min_delta` ignores tiny absolute moves.
 - Separate `drop_message` / `increase_message` templates; variables: `{object} {field} {metric} {old} {new}
   {delta} {delta_pct} {threshold} {baseline}`.
@@ -672,6 +680,11 @@ The model sees the run's findings (scores, drift, expected-schema checks, action
 shown with the answer. Answers can be downloaded (CSV / Markdown), added to the Action Plan, or the whole session
 exported. The server binds to 127.0.0.1 only and requires a per-session token; the report file isn't changed.
 Works with any configured provider (Claude CLI, Cursor, Copilot, Anthropic, OpenAI).
+
+Both commands take `--ai <provider>` and `--ai-model <model>` (default `auto`), e.g.
+`datalens serve <run-dir> --ai copilot --ai-model claude-opus-5`. The chat header shows the provider and model.
+A report opened directly (no server) shows a dimmed **Ask Datalens · OFF** button that gives the exact command
+to copy. Walkthrough: [scenario 13](../examples/scenarios/13-chat/README.md).
 
 ---
 

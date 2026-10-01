@@ -272,3 +272,64 @@ def test_model_is_auto_unless_configured_and_bad_model_falls_back(monkeypatch):
     assert ok and text.startswith("{")
     assert "--model" in calls[0] and "--model" not in calls[1]
     assert "claude-nope" in provider.model_note and provider.display_model == "auto"
+
+
+def _copilot(monkeypatch, *, copilot="copilot", gh=None, model=None):
+    from datalens.ai.providers import copilot_login
+
+    monkeypatch.delenv("DATALENS_COPILOT_MODEL", raising=False)
+    paths = {"copilot": copilot, "gh": gh}
+    monkeypatch.setattr(copilot_login, "find_executable", lambda name: paths.get(name))
+    return copilot_login.CopilotLoginProvider(Config(ai_model=model) if model else Config())
+
+
+def test_copilot_prefers_standalone_cli_in_a_sandbox(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, timeout=180, cwd=None):
+        calls.append((list(cmd), cwd))
+        return True, '{"data_story": "ok"}', ""
+
+    monkeypatch.setattr("datalens.ai.providers.copilot_login.run_cli_prompt", fake_run)
+    provider = _copilot(monkeypatch, gh="gh")
+    assert provider.cli == "copilot" and provider.display_model == "auto"
+    insights = provider.generate_insights({"objects": []}, context={"objects": []})
+    cmd, cwd = calls[-1]
+    assert cmd[:2] == ["copilot", "-p"] and cmd[-2:] == ["--model", "auto"]
+    assert "--no-ask-user" in cmd and cwd and not os.path.exists(cwd)  # temp sandbox, cleaned up
+    assert insights["provider"] == "copilot" and insights["model"] == "auto"
+
+
+def test_copilot_falls_back_to_gh_and_ignores_model(monkeypatch):
+    calls = []
+    monkeypatch.setattr("datalens.ai.providers.copilot_login.run_cli_prompt",
+                        lambda cmd, timeout=180, cwd=None: calls.append(list(cmd)) or (True, "answer", ""))
+    provider = _copilot(monkeypatch, copilot=None, gh="gh", model="gpt-5")
+    assert provider.cli == "gh copilot" and provider.display_model == "auto"
+    assert "gpt-5" in provider.model_note
+    monkeypatch.setattr(provider, "is_available", lambda: True)
+    assert provider.complete("hi") == (True, "answer")
+    assert calls[-1] == ["gh", "copilot", "-p", "hi"]
+
+
+def test_copilot_rejected_model_retries_on_auto(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, timeout=180, cwd=None):
+        calls.append(list(cmd))
+        if "bogus-model" in cmd:
+            return False, "", "Error: Model bogus-model is not available"
+        return True, "answer", ""
+
+    monkeypatch.setattr("datalens.ai.providers.copilot_login.run_cli_prompt", fake_run)
+    provider = _copilot(monkeypatch, model="bogus-model")
+    monkeypatch.setattr(provider, "is_available", lambda: True)
+    assert provider.complete("hi") == (True, "answer")
+    assert calls[0][-1] == "bogus-model" and calls[1][-1] == "auto"
+    assert "bogus-model" in provider.model_note and provider.display_model == "auto"
+
+
+def test_copilot_unavailable_without_any_cli(monkeypatch):
+    provider = _copilot(monkeypatch, copilot=None, gh=None)
+    assert not provider.is_available()
+    assert provider.generate_insights({"objects": []})["enabled"] is False

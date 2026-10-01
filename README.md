@@ -34,7 +34,7 @@ offline HTML report, a JSON summary for CI/CD, and an optional chat you can ask 
 
 The repo ships a real, related dataset: IPL cricket from [Cricsheet](https://cricsheet.org) — five entities
 (`matches`, `deliveries`, `players`, `teams`, `venues`), ~160K rows, nested objects and arrays. Day 2 is the next
-load with **10 deliberate problems** injected.
+load with **13 deliberate problems** injected.
 
 ```bash
 datalens analyze -s file -p test_data/cricket/day1 --pattern "*.jsonl.gz" -o output/demo --version-tag day1
@@ -48,6 +48,9 @@ datalens analyze -s file -p test_data/cricket/day2 --pattern "*.jsonl.gz" -o out
 | new `ball_speed_kph`, 90% null | new field, 10% populated |
 | `toss.decision` dropped | **removed field** (was 100% populated) |
 | `non_striker_id` null in 30% of rows | **coverage** 100% → 70% |
+| `matches.city` blank in 25% of matches | **coverage** 94% → 72% (−24%): listed, *within* the 25% decrease rule |
+| `matches.attendance` filled on more matches | **coverage** 40% → 63% (+58%): breaches the 50% increase rule |
+| `deliveries.shot_type` filled on more rows | **coverage** 50% → 56% (+12%): listed, within its rule |
 | more 4s and 6s in `runs.batter` | **distribution shift** (PSI 0.13, top movers listed) |
 | new wicket kind, new venue | **new category values** |
 | 40% of deliveries missing | **row count** 158,901 → 95,555 |
@@ -181,6 +184,7 @@ Then ask follow-up questions:
 ```bash
 datalens serve output/demo/day2_day2      # report + chat on http://127.0.0.1:8765
 datalens ask "Which bowler ids are orphaned most often?" output/demo/day2_day2
+datalens serve output/demo/day2_day2 --ai copilot --ai-model claude-opus-5   # any provider and model
 ```
 
 The model can run **read-only SQL on a PII-masked sample** of the data; every query is shown with the answer.
@@ -190,6 +194,9 @@ only, per-session token, and the report file is never changed.
 ![AI Review](docs/images/ai-insights.png)
 
 ![Chat with a run](docs/images/chat.png)
+
+Opened directly, a report shows a dimmed **Ask Datalens · OFF** button. Click it for the copyable `serve` command.
+Pick any provider and model with `--ai` and `--ai-model`: see [scenario 13](examples/scenarios/13-chat/README.md).
 
 ---
 

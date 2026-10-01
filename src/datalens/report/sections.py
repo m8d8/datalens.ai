@@ -311,8 +311,8 @@ def render_action_plan(decision: dict[str, Any] | None, version_tag: str) -> str
           <div class="dl-kpi"><div class="v" style="color:var(--color-warning)">{sev_counts['medium']}</div><div class="l">medium</div></div>
           <div class="dl-kpi"><div class="v" style="color:var(--color-info)">{sev_counts['low']}</div><div class="l">low</div></div>
         </div>
-        <p class="dl-muted">Have a question about this data? Run <code class="dl-inline">datalens serve &lt;this run's folder&gt;</code>
-          to chat with it (answers can be added here), or <code class="dl-inline">datalens ask "…" &lt;folder&gt;</code>.</p>
+        <p class="dl-muted">Have a question about this data? <a href="#" data-dl-chat-help>Turn on chat</a>
+          (answers can be added here), or run <code class="dl-inline">datalens ask "…" &lt;folder&gt;</code>.</p>
         <div class="dl-toolbar">
           <button class="dl-btn" type="button" data-filter="severity" data-value="all" aria-pressed="true">All severities</button>
           {sev_buttons}
@@ -766,3 +766,98 @@ def render_contract(contract: dict[str, Any] | None) -> str:
         with <code class="dl-inline">datalens schema infer</code>, edit it, then pass it with <code class="dl-inline">--schema</code>.</p>
     </div>
     {''.join(blocks)}"""
+
+
+# ── Chat placeholder (static report) ────────────────────────────────────────
+# A static report can't chat, so it shows a muted "Ask Datalens" button that explains
+# how to turn chat on. `datalens serve` injects the real chat and hides this one.
+
+CHAT_OFFLINE_HTML = """
+<style>
+#dl-chat-off { position:fixed; right:22px; bottom:22px; z-index:1000; display:inline-flex; align-items:center; gap:8px;
+  padding:10px 16px; border-radius:999px; border:1px dashed var(--border-secondary, var(--border-primary));
+  background:var(--bg-secondary); color:var(--text-tertiary); font:600 .9rem var(--font-sans); cursor:pointer;
+  box-shadow:var(--shadow-sm, none); }
+#dl-chat-off:hover, #dl-chat-off[aria-expanded="true"] { color:var(--text-secondary); border-style:solid; }
+#dl-chat-off .off { font-size:.68rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+  padding:2px 6px; border-radius:6px; background:var(--bg-tertiary); color:var(--text-tertiary); }
+#dl-chat-off-pop { position:fixed; right:22px; bottom:76px; z-index:1001; width:min(460px, calc(100vw - 32px));
+  display:none; background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border-primary);
+  border-radius:12px; box-shadow:var(--shadow-lg, 0 10px 30px rgba(0,0,0,.25)); padding:14px 16px; font-size:.86rem; line-height:1.5; }
+#dl-chat-off-pop.open { display:block; }
+#dl-chat-off-pop h4 { margin:0 0 4px; font-size:.95rem; display:flex; align-items:center; gap:8px; }
+#dl-chat-off-pop h4 span { flex:1; }
+#dl-chat-off-pop p { margin:6px 0; color:var(--text-secondary); }
+#dl-chat-off-pop .cmd { display:flex; gap:8px; align-items:stretch; margin:6px 0 10px; }
+#dl-chat-off-pop code { flex:1; min-width:0; display:block; padding:8px 10px; border-radius:8px; background:var(--bg-primary);
+  border:1px solid var(--border-primary); font:.78rem var(--font-mono, ui-monospace, monospace); color:var(--text-primary);
+  white-space:pre-wrap; word-break:break-all; }
+#dl-chat-off-pop button.copy { flex:none; padding:0 12px; border-radius:8px; border:1px solid var(--border-primary);
+  background:var(--bg-tertiary); color:var(--text-primary); font:600 .78rem var(--font-sans); cursor:pointer; }
+#dl-chat-off-pop button.copy.done { color:var(--color-success); }
+#dl-chat-off-pop .x { border:0; background:none; color:var(--text-tertiary); font-size:1rem; cursor:pointer; }
+#dl-chat-off-pop .fine { font-size:.76rem; color:var(--text-tertiary); }
+</style>
+<button id="dl-chat-off" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="dl-chat-off-pop"
+  title="Chat is off in a static report. Click to see how to turn it on.">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+  Ask Datalens <span class="off">off</span></button>
+<div id="dl-chat-off-pop" role="dialog" aria-labelledby="dl-chat-off-title">
+  <h4><span id="dl-chat-off-title">Turn on chat for this report</span>
+    <button class="x" type="button" aria-label="Close">✕</button></h4>
+  <p>This is a static file, so it can't answer questions. Open it through Datalens to ask about the data in plain
+    English. Answers come from SQL on a PII-masked sample, and you can download them or add them to the Action Plan.</p>
+  <p><b>Run this in a terminal:</b></p>
+  <div class="cmd"><code data-cmd="pip"></code><button class="copy" type="button" data-copy="pip">Copy</button></div>
+  <p><b>Installed with uv?</b> Run it from the Datalens project folder:</p>
+  <div class="cmd"><code data-cmd="uv"></code><button class="copy" type="button" data-copy="uv">Copy</button></div>
+  <p class="fine">Add <code style="display:inline;padding:1px 4px">--ai claude</code> (or copilot, anthropic, openai,
+    cursor) to choose the AI provider. The server listens on 127.0.0.1 only, and this file isn't changed.</p>
+</div>
+<script>
+(function(){
+  var btn = document.getElementById('dl-chat-off'), pop = document.getElementById('dl-chat-off-pop');
+  if (!btn || !pop) return;
+  function runFolder(){
+    if (location.protocol !== 'file:') return null;
+    var p = decodeURIComponent(location.pathname);
+    if (/^\\/[A-Za-z]:\\//.test(p)) p = p.slice(1);          // Windows: /C:/... -> C:/...
+    return p.slice(0, p.lastIndexOf('/')) || '/';
+  }
+  function quote(s){ return /^[A-Za-z0-9_@%+=:,.\\/-]+$/.test(s) ? s : "'" + s.replace(/'/g, "'\\\\''") + "'"; }
+  var folder = runFolder(), arg = folder ? quote(folder) : '<this report\\'s folder>';
+  var cmds = {pip: 'datalens serve ' + arg, uv: 'uv run datalens serve ' + arg};
+  pop.querySelectorAll('[data-cmd]').forEach(function(el){ el.textContent = cmds[el.getAttribute('data-cmd')]; });
+  function setOpen(open){ pop.classList.toggle('open', open); btn.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+  btn.addEventListener('click', function(e){ e.stopPropagation(); setOpen(!pop.classList.contains('open')); });
+  pop.querySelector('.x').addEventListener('click', function(){ setOpen(false); });
+  document.addEventListener('click', function(e){
+    var help = e.target.closest && e.target.closest('[data-dl-chat-help]');
+    if (help) { e.preventDefault(); e.stopPropagation(); setOpen(true); return; }
+    if (pop.classList.contains('open') && !pop.contains(e.target)) setOpen(false);
+  });
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape') setOpen(false); });
+  function copyText(text, done){
+    function fallback(){
+      var ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (err) {}
+      document.body.removeChild(ta);
+    }
+    try {
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback);
+      else fallback();
+    } catch (err) { fallback(); }
+  }
+  pop.querySelectorAll('[data-copy]').forEach(function(b){
+    b.addEventListener('click', function(){
+      copyText(cmds[b.getAttribute('data-copy')], function(){
+        b.textContent = 'Copied'; b.classList.add('done');
+        setTimeout(function(){ b.textContent = 'Copy'; b.classList.remove('done'); }, 1600);
+      });
+    });
+  });
+})();
+</script>
+"""

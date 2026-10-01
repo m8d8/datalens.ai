@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from datalens.profiling.coverage import coverage_pct
+
 if TYPE_CHECKING:
     from datalens.config import Config
 
@@ -63,8 +65,8 @@ def generate_summary(schema_json: dict[str, Any], config: "Config") -> str:
         lines.append("")
 
         # Key statistics
-        high_coverage = [f for f in fields if f.get("presence_count", 0) / max(sampled, 1) >= 0.9]
-        low_coverage = [f for f in fields if f.get("presence_count", 0) / max(sampled, 1) < 0.5]
+        high_coverage = [f for f in fields if coverage_pct(f, sampled) >= 90]
+        low_coverage = [f for f in fields if coverage_pct(f, sampled) < 50]
         multi_type = [f for f in fields if len([t for t in f.get("types", {}) if t != "null"]) > 1]
         low_card = [f for f in fields if f.get("low_cardinality")]
 
@@ -85,12 +87,11 @@ def generate_summary(schema_json: dict[str, Any], config: "Config") -> str:
 
             for field in fields[:10]:  # First 10 fields
                 path = field.get("path", "")
-                presence = field.get("presence_count", 0)
-                coverage_pct = (presence / max(sampled, 1)) * 100
+                cov = coverage_pct(field, sampled)
                 types = ", ".join(field.get("types", {}).keys())
                 distinct = field.get("distinct_count_in_sample", 0)
 
-                lines.append(f"| `{path}` | {coverage_pct:.1f}% | {types} | {distinct} |")
+                lines.append(f"| `{path}` | {cov:.1f}% | {types} | {distinct} |")
 
             if len(fields) > 10:
                 lines.append(f"| ... and {len(fields) - 10} more fields | | | |")

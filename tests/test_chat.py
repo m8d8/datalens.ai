@@ -116,3 +116,15 @@ def test_server_requires_token_and_localhost(run_dir):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_static_report_shows_chat_off_and_served_page_replaces_it(run_dir):
+    from datalens.chat.server import build_page
+
+    ws = RunWorkspace(run_dir)
+    static = ws.report_path.read_text(encoding="utf-8")
+    assert 'id="dl-chat-off"' in static and "datalens serve " in static   # disabled button + copyable command
+    assert "DATALENS_CHAT" not in static
+    served = build_page(ws, "tok", "scripted", True).decode()
+    assert "#dl-chat-off, #dl-chat-off-pop { display:none !important; }" in served
+    assert 'id="dl-chat-btn"' in served

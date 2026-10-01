@@ -18,6 +18,8 @@ from email.mime.text import MIMEText
 from enum import Enum
 from typing import Any
 
+from datalens.profiling.coverage import coverage_pct
+
 logger = logging.getLogger(__name__)
 
 
@@ -614,8 +616,7 @@ class AlertManager:
             for obj in objects:
                 sampled = obj.get("sampled", 1) or 1
                 for field in obj.get("fields", []):
-                    presence = field.get("presence_count", 0)
-                    coverage = (presence / sampled * 100) if sampled > 0 else 0
+                    coverage = coverage_pct(field, sampled)  # true coverage: missing/null/empty excluded
                     coverages.append(coverage)
                     
                     null_rate = 100 - coverage

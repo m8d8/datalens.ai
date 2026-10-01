@@ -46,7 +46,9 @@ SEVERITY_ORDER = {"ok": 0, "info": 1, "warn": 2, "fail": 3}
 # variation, loud on real breakage. Every value is overridable in config.
 BUILTIN_DEFAULTS: dict[str, Any] = {
     "row_count": {"drop_pct": {"warn": 10, "fail": 25}, "increase_pct": {"warn": 50, "fail": 200}},
-    "coverage": {"drop_pts": {"warn": 5, "fail": 15}, "increase_pts": {"warn": 15}},
+    # Relative change of the coverage %: 100% → 70% is a 30% decrease; 40% → 63% a 58% increase.
+    # min_delta ignores moves under 1 point (sparse fields wobble in relative terms).
+    "coverage": {"drop_pct": 25, "increase_pct": 50, "min_delta": 1.0},
     "distinct": {"change_pct": {"warn": 25}, "min_delta": 3},
     "orphan_pct": {"increase_pts": {"warn": 0.5, "fail": 2}},
     "dqi": {"drop_pts": {"warn": 3, "fail": 8}},
@@ -125,6 +127,26 @@ class DriftRules:
         return float(rule.get("psi_warn", 0.10)), float(rule.get("psi_fail", 0.25)), scope
 
     # ── evaluation ───────────────────────────────────────────────────────
+    def describe(self) -> list[dict[str, str]]:
+        """Every rule in effect: global defaults, then object and field overrides."""
+        out: list[dict[str, str]] = []
+        for metric, rule in self.defaults.items():
+            scope = "dataset" if metric in self._user_defaults else "builtin"
+            out.append({"metric": metric, "scope": scope, "target": "all objects & fields",
+                        "threshold": _rule_text(metric, rule)})
+        for obj, obj_rule in self.objects.items():
+            if not isinstance(obj_rule, dict):
+                continue
+            for metric, rule in obj_rule.items():
+                if metric == "fields":
+                    continue
+                out.append({"metric": metric, "scope": "object", "target": obj, "threshold": _rule_text(metric, rule)})
+            for field, field_rule in (obj_rule.get("fields") or {}).items():
+                for metric, rule in (field_rule or {}).items():
+                    out.append({"metric": metric, "scope": "field", "target": f"{obj}.{field}",
+                                "threshold": _rule_text(metric, rule)})
+        return out
+
     def evaluate(
         self, metric: str, old: float, new: float, obj: str | None = None, path: str | None = None,
     ) -> Evaluation:
@@ -155,6 +177,23 @@ def evaluate_change(rule: dict[str, Any], old: float, new: float, scope: str) ->
     return best
 
 
+def describe_rule(rule: dict[str, Any], direction: str | None = None) -> str:
+    """Human text of a threshold rule, e.g. "drop ≥ 25% · increase ≥ 50%" (only `direction` if given)."""
+    parts = []
+    for key in ("drop_pct", "drop_pts", "increase_pct", "increase_pts", "change_pct", "change_pts"):
+        if key not in rule:
+            continue
+        kind = key.split("_")[0]
+        if direction and kind not in (direction, "change"):
+            continue
+        unit = "%" if key.endswith("_pct") else " pts"
+        levels = _levels(rule[key])
+        text = " / ".join(f"{sev} ≥ {limit:g}{unit}" if len(levels) > 1 else f"≥ {limit:g}{unit}"
+                          for sev, limit in levels)
+        parts.append(f"{'either way' if kind == 'change' else kind} {text}")
+    return " · ".join(parts) or "—"
+
+
 def render_message(template: str | None, direction: str, **values: Any) -> str:
     """Fill a message template (user-defined or default) with change details."""
     values.setdefault("field", "")
@@ -164,6 +203,19 @@ def render_message(template: str | None, direction: str, **values: Any) -> str:
         return template.format(**values)
     except (KeyError, IndexError, ValueError):
         return template
+
+
+def _rule_text(metric: str, rule: Any) -> str:
+    if not isinstance(rule, dict):
+        return str(rule)
+    if metric == "distribution":
+        return f"PSI warn ≥ {rule.get('psi_warn', 0.1)} · fail ≥ {rule.get('psi_fail', 0.25)}"
+    if metric in ("schema", "categories"):
+        return " · ".join(f"{k.replace('_', ' ')}: {v}" for k, v in rule.items())
+    text = describe_rule(rule)
+    if rule.get("min_delta"):
+        text += f" (ignores < {rule['min_delta']:g})"
+    return text
 
 
 def _levels(value: Any) -> list[tuple[str, float]]:

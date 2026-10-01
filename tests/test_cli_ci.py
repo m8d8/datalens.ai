@@ -89,3 +89,12 @@ def test_schema_infer_and_validate(tmp_path):
     bad = runner.invoke(cli, ["schema", "validate", "-s", "file", "-p", str(broken), "--schema", str(schema_file),
                               "--format", "json"])
     assert bad.exit_code == 2 and json.loads(bad.output)["status"] == "fail"
+
+
+def test_coverage_cli_flags_become_rules():
+    from datalens.cli import _apply_coverage_flags
+
+    cfg = _apply_coverage_flags({}, 15, 40, ("orders.id=drop:5", "orders.title=change:20"))
+    assert cfg["defaults"]["coverage"]["drop_pct"] == 15 and cfg["defaults"]["coverage"]["increase_pct"] == 40
+    assert cfg["objects"]["orders"]["fields"]["id"]["coverage"] == {"drop_pct": 5.0}
+    assert cfg["objects"]["orders"]["fields"]["title"]["coverage"] == {"change_pct": 20.0}

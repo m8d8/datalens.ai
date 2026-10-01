@@ -34,7 +34,7 @@ from datalens.drift.metrics import (
     psi_noise,
     split_key,
 )
-from datalens.drift.rules import SEVERITY_ORDER, DriftRules, render_message
+from datalens.drift.rules import SEVERITY_ORDER, DriftRules, describe_rule, render_message
 from datalens.history.diff import _material_types
 from datalens.profiling.naming import is_identifier_name
 
@@ -125,6 +125,7 @@ def build_drift_report(
     ref_objects = {o["object"]: o for o in (reference_schema or {}).get("objects", [])}
     changed_fields: set[tuple[str, str]] = set()
     skipped_small: set[str] = set()
+    coverage_obs: list[dict[str, Any]] = []
     min_rows = rules.min_rows
     ref_keys = reference_fields or set()
 
@@ -291,6 +292,9 @@ def build_drift_report(
                                  f"(median {_fmt(metric, band.median)} over {band.n} runs, z={z:+.1f})."),
                         how=HOW[metric] + " Band = median ± k·1.4826·MAD of recent runs, widened to "
                             "cover every non-breached value seen in the window.")
+                if metric == "coverage":
+                    coverage_obs.append(_coverage_obs(obj, path, band.median, new, severity, "rolling",
+                                                      f"learned band {_fmt(metric, band.lower)}–{_fmt(metric, band.upper)}"))
                 # Explicit user rules still apply on top of the learned band.
                 rule, scope = rules.resolve(metric, obj, path)
                 if scope in ("field", "object", "dataset") and key in ref_metrics:
@@ -301,6 +305,13 @@ def build_drift_report(
         if key in ref_metrics:
             if metric == "coverage" and _within_noise(ref_metrics[key], new, obj, ref_metrics, current_metrics):
                 continue
+            if metric == "coverage":
+                old = ref_metrics[key]
+                ev = rules.evaluate(metric, old, new, obj or None, path or None)
+                rule, scope = rules.resolve(metric, obj or None, path or None)
+                if _notable_coverage_move(old, new):
+                    coverage_obs.append(_coverage_obs(obj, path, old, new, ev.severity, scope,
+                                                      describe_rule(rule, ev.direction), ev.threshold))
             _static(out, rules, metric, obj, path, ref_metrics[key], new, label, where)
 
     findings = out.findings
@@ -332,11 +343,72 @@ def build_drift_report(
         ],
         "findings": findings,
         "highlights": [f["message"] for f in findings if f["severity"] in ("fail", "warn")][:10],
+        "coverage_changes": sorted(coverage_obs, key=lambda c: (-SEVERITY_ORDER[c["severity"]],
+                                                                -abs(c["delta_pct"] or 0))),
+        "rules_in_effect": _rules_in_effect(rules, findings, base_mode == "rolling"),
         "breached_metrics": sorted({
             metric_key(f["metric"], f.get("object", ""), f.get("field", ""))
             for f in findings if f["severity"] == "fail" and f["metric"] in THRESHOLD_METRICS
         }),
     }
+
+
+def _notable_coverage_move(old: float, new: float) -> bool:
+    """Coverage moves worth listing even when no rule fires: ≥1 pt and ≥5% relative."""
+    return abs(new - old) >= 1 and (abs(new - old) / old * 100 >= 5 if old else True)
+
+
+def _coverage_obs(obj, path, old, new, severity, scope, rule_text, fired=None) -> dict[str, Any]:
+    """One row of the Coverage Shifts table: the change, the rule that applies, and its result."""
+    return {
+        "object": obj, "field": path, "old": round(old, 2), "new": round(new, 2),
+        "delta_pts": round(new - old, 2), "delta_pct": _pct(old, new),
+        "direction": "increase" if new > old else "drop",
+        "rule": rule_text, "scope": scope, "fired": fired or "", "severity": severity,
+    }
+
+
+_KIND_TO_RULE = {
+    "field_added": "schema", "field_removed": "schema", "field_renamed": "schema", "type_changed": "schema",
+    "object_added": "schema", "object_removed": "schema", "categories_new": "categories",
+    "categories_vanished": "categories",
+}
+
+
+def _rules_in_effect(rules: DriftRules, findings: list[dict[str, Any]], rolling: bool) -> list[dict[str, Any]]:
+    """Every configured rule with how many findings it produced (and on what)."""
+    import fnmatch
+
+    table = []
+    for entry in rules.describe():
+        hits = []
+        for f in findings:
+            if f["severity"] == "info" or _KIND_TO_RULE.get(f["kind"], f["metric"]) != entry["metric"]:
+                continue
+            scope = (f.get("rule") or {}).get("scope")
+            obj, fld = f.get("object") or "", f.get("field") or ""
+            if entry["scope"] in ("builtin", "dataset") and scope == entry["scope"]:
+                hits.append(f)
+            elif entry["scope"] == "object" and scope == "object" and fnmatch.fnmatchcase(obj, entry["target"]):
+                hits.append(f)
+            elif entry["scope"] == "field" and scope == "field":
+                t_obj, _, t_fld = entry["target"].partition(".")
+                if fnmatch.fnmatchcase(obj, t_obj) and fnmatch.fnmatchcase(fld, t_fld):
+                    hits.append(f)
+        table.append({**entry, "fired": len(hits),
+                      "worst": "fail" if any(h["severity"] == "fail" for h in hits) else "warn" if hits else "ok",
+                      "examples": [f"{h.get('object') or 'dataset'}{'.' + h['field'] if h.get('field') else ''}"
+                                   for h in hits[:4]]})
+    if rolling:
+        hits = [f for f in findings if (f.get("rule") or {}).get("scope") == "rolling" and f["severity"] != "info"]
+        table.insert(0, {"metric": "all metrics", "scope": "rolling", "target": "learned band per metric",
+                         "threshold": "outside median ± k·σ̂ and the range seen recently", "fired": len(hits),
+                         "worst": "fail" if any(h["severity"] == "fail" for h in hits) else "warn" if hits else "ok",
+                         "examples": [f"{h.get('object') or 'dataset'}{'.' + h['field'] if h.get('field') else ''}"
+                                      for h in hits[:4]]})
+    table.sort(key=lambda r: (-r["fired"], {"field": 0, "object": 1, "dataset": 2, "rolling": 3, "builtin": 4}
+                              .get(r["scope"], 5)))
+    return table
 
 
 def _within_noise(old: float, new: float, obj: str, ref_metrics: dict, cur_metrics: dict) -> bool:

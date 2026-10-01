@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from datalens.profiling.coverage import coverage_pct
 from datalens.profiling.naming import is_identifier_name
 
 
@@ -294,8 +295,9 @@ def compute_object_quality(obj_data: dict[str, Any]) -> ObjectQuality:
         weight=DIMENSION_WEIGHTS["completeness"],
         details={
             "total_fields": len(fields),
-            "high_coverage_fields": sum(1 for f in field_qualities if f.completeness >= 90),
-            "low_coverage_fields": sum(1 for f in field_qualities if f.completeness < 50),
+            # Counts use true coverage (missing/null/empty excluded), like every coverage figure.
+            "high_coverage_fields": sum(1 for f in fields if coverage_pct(f, sampled) >= 90),
+            "low_coverage_fields": sum(1 for f in fields if coverage_pct(f, sampled) < 50),
         },
     )
 

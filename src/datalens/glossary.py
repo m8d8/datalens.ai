@@ -150,12 +150,17 @@ GLOSSARY: dict[str, dict[str, Any]] = {
     },
     "coverage": {
         "title": "Coverage",
-        "short": "Share of rows where the field exists and holds a non-empty value.",
+        "short": ("True coverage: share of rows where the field holds a real value. Rows where it is missing, null "
+                  "or empty all count against it — the same number everywhere in the report and its exports."),
         "when": "Every field, every run; tracked across runs for drift.",
         "how": [
-            "(present − null/empty) / rows sampled × 100",
-            "drift: drop/increase in percentage points (pts) or relative % vs the reference; changes within "
-            "3 standard errors of sampling noise (√(p(1−p)/n)) are ignored",
+            "(rows with a real value) / rows profiled × 100 — a missing key, null, \"\", [] or {} is not a value",
+            "drift rule (default): a decrease of ≥ 25% or an increase of ≥ 50%, relative to the earlier coverage "
+            "(100% → 70% is −30%; 40% → 63% is +58%); moves under 1 point are ignored",
+            "override globally (--coverage-drop / --coverage-increase), per object, or per field "
+            "(--field-coverage-rule, a drift: config section, or x-datalens in an expected schema); the most "
+            "specific rule wins",
+            "changes within 3 standard errors of sampling noise (√(p(1−p)/n)) are ignored",
         ],
     },
     "row_count": {

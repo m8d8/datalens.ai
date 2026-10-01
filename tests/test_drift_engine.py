@@ -196,3 +196,30 @@ def test_breached_runs_are_excluded_from_the_baseline():
 @pytest.mark.parametrize("mode", ["previous", "baseline:day1"])
 def test_no_reference_means_no_report(mode):
     assert build_drift_report(_schema(1), {}, rules=DriftRules(), mode=mode) is None
+
+
+def test_coverage_defaults_are_relative_25_drop_and_50_increase():
+    assert evaluate_change(DriftRules().resolve("coverage")[0], 100, 70, "builtin").severity == "fail"   # -30%
+    assert evaluate_change(DriftRules().resolve("coverage")[0], 94.3, 71.8, "builtin").severity == "ok"  # -23.9%
+    assert evaluate_change(DriftRules().resolve("coverage")[0], 40, 63.2, "builtin").severity == "fail"  # +58%
+    assert evaluate_change(DriftRules().resolve("coverage")[0], 50, 56, "builtin").severity == "ok"      # +12%
+
+
+def test_coverage_shifts_and_rules_in_effect():
+    def schema(cov_a, cov_b):
+        fields = []
+        for path, cov in (("a", cov_a), ("b", cov_b)):
+            fields.append({"path": path, "presence_count": int(5000 * cov), "null_empty_count": 0,
+                           "types": {"string": int(5000 * cov)}, "distinct_count_in_sample": 10})
+        return {"objects": [{"object": "t", "sampled": 5000, "total_rows": 5000, "fields": fields}]}
+
+    rules = DriftRules({"objects": {"t": {"fields": {"b": {"coverage": {"increase_pct": 5}}}}}})
+    ref, cur = schema(0.40, 0.50), schema(0.632, 0.56)
+    report = build_drift_report(cur, extract_metrics(cur), rules=rules, reference_schema=ref,
+                                reference_metrics=extract_metrics(ref))
+    shifts = {c["field"]: c for c in report["coverage_changes"]}
+    assert shifts["a"]["severity"] == "fail" and shifts["a"]["scope"] == "builtin" and "increase ≥ 50%" in shifts["a"]["rule"]
+    assert shifts["b"]["severity"] == "fail" and shifts["b"]["scope"] == "field"      # +12% vs field rule 5%
+    fired = {(r["metric"], r["scope"]): r["fired"] for r in report["rules_in_effect"]}
+    assert fired[("coverage", "builtin")] == 1 and fired[("coverage", "field")] == 1
+    assert fired[("dqi", "builtin")] == 0

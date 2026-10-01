@@ -87,6 +87,11 @@ class AIProvider(ABC):
         """Authentication mode: ``api_key`` or ``license``."""
         return "api_key"
 
+    @property
+    def display_model(self) -> str:
+        """The model shown in reports and chat ("auto" when the provider picks)."""
+        return AUTO
+
     @abstractmethod
     def generate_insights(
         self,

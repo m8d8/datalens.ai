@@ -31,6 +31,7 @@ from datalens.profiling.statistics import compute_statistics_summary
 from datalens.profiling.patterns import analyze_patterns
 from datalens.profiling.joins import analyze_joins
 from datalens.report.sections import (
+    CHAT_OFFLINE_HTML,
     render_action_plan,
     render_contract,
     render_drift_report,
@@ -40,6 +41,7 @@ from datalens.report.sections import (
 from datalens.report.sections import icon as section_icon
 from datalens.glossary import tip as tip_text
 from datalens.report.ai_review import render_ai_review
+from datalens.profiling.coverage import coverage_pct as true_coverage, null_empty_pct
 from datalens.profiling.insights import build_insights
 from datalens.report._logo import LOGO_ICON_DARK_SVG, LOGO_ICON_LIGHT_SVG
 
@@ -208,6 +210,11 @@ def generate_html_report(
         field_distributions_json=json.dumps(field_distributions),
         max_distinct_configured=config.max_distinct_values,
     )
+
+    # Chat placeholder: explains how to turn chat on (`datalens serve` replaces it with the real panel)
+    idx = html_content.rfind("</body>")
+    if idx >= 0:
+        html_content = html_content[:idx] + CHAT_OFFLINE_HTML + html_content[idx:]
 
     return html_content
 
@@ -814,7 +821,7 @@ def _drift_field_table(
         nulls = field.get("null_empty_count", 0)
         eff = max(0, presence - nulls)
         coverage_pct = (eff / sampled * 100) if sampled else 0.0
-        cov_class = "coverage-high" if coverage_pct >= 90 else "coverage-medium" if coverage_pct >= 50 else "coverage-low"
+        cov_class = _coverage_band(coverage_pct)
         types = field.get("types", {})
         type_badges = " ".join(
             f'<span class="type-badge type-{t}">{t}</span>'
@@ -873,7 +880,7 @@ def _fmt_drift_value(kind: str, value: Any) -> str:
     if isinstance(value, list):
         return ", ".join(str(v) for v in value[:6]) + (" …" if len(value) > 6 else "")
     if isinstance(value, (int, float)):
-        if kind in ("coverage", "orphan_pct"):
+        if kind in ("coverage", "orphan_pct", "field_added", "field_removed"):
             return f"{value:.1f}%"
         if kind in ("row_count", "distinct"):
             return f"{value:,.0f}"
@@ -890,6 +897,87 @@ def _short_message(f: dict[str, Any]) -> str:
         if msg.startswith(prefix):
             return msg[len(prefix):]
     return msg
+
+
+_RESULT_META = {"fail": ("Breach", "var(--color-danger)"), "warn": ("Warning", "var(--color-warning)"),
+                "info": ("Info", "var(--color-info)"), "ok": ("Within rule", "var(--color-success)")}
+_SCOPE_LABEL = {"builtin": "global default", "dataset": "global (config)", "object": "object rule",
+                "field": "field rule", "rolling": "learned band"}
+
+
+def _render_coverage_shifts(changes: list[dict[str, Any]], prev_index, cur_index) -> str:
+    """Coverage Shifts: every real coverage move, the rule that applies to it, and whether it fired."""
+    rows = []
+    for c in changes:
+        up = c["delta_pts"] > 0
+        color = "var(--color-success)" if up else "var(--color-danger)"
+        arrow = "▲" if up else "▼"
+        label, res_color = _RESULT_META.get(c["severity"], _RESULT_META["ok"])
+        pct = f"{c['delta_pct']:+.1f}%" if c.get("delta_pct") is not None else "new"
+        fired = c["severity"] in ("fail", "warn")
+        rule_html = (f'<span class="rule-chip{" rule-fired" if fired else ""}" '
+                     f'style="--rc:{res_color}">{html.escape(c["rule"])}</span>'
+                     f'<div class="chg-kind">{html.escape(_SCOPE_LABEL.get(c["scope"], c["scope"]))}</div>')
+        rows.append(f"""<tr data-object="{html.escape(c['object'])}">
+            <td><span class="object-name">{html.escape(c['object'])}</span></td>
+            <td><code>{html.escape(c['field'])}</code></td>
+            <td class="text-center">{c['old']:.1f}%</td>
+            <td class="text-center">{c['new']:.1f}%</td>
+            <td class="text-center" style="color:{color};font-weight:600">{arrow} {abs(c['delta_pts']):.1f} pts</td>
+            <td class="text-center" style="color:{color};font-weight:600">{pct}</td>
+            <td data-v="{html.escape(c['rule'])} ({html.escape(_SCOPE_LABEL.get(c['scope'], c['scope']))})">{rule_html}</td>
+            <td><span class="chg-sev" style="color:{res_color};border-color:{res_color}">{label}</span></td>
+            <td>{_before_after_dist(c['object'], c['field'], prev_index, cur_index)}</td>
+        </tr>""")
+    fired = sum(1 for c in changes if c["severity"] in ("fail", "warn"))
+    badge = "badge-danger" if any(c["severity"] == "fail" for c in changes) else "badge-warning"
+    return f"""
+            <div class="card">
+                <div class="card-header"><h3>Coverage Shifts <span class="badge {badge}">{len(changes)}</span></h3></div>
+                <div class="card-body">
+                    <p style="color:var(--text-secondary);margin-top:0">{fired} of {len(changes)} coverage change(s)
+                        crossed their rule. Change % is relative (100% → 70% is −30%); rules apply per direction and
+                        the most specific wins: field → object → global. Configure with <code>--coverage-drop</code> /
+                        <code>--coverage-increase</code>, <code>--field-coverage-rule</code>, a <code>drift:</code>
+                        config section or an expected schema.</p>
+                    <div class="table-container">
+                    <table class="data-table sortable drift-table"><thead><tr>
+                    <th>Object</th><th>Field</th><th class="text-center">Was</th><th class="text-center">Now</th>
+                    <th class="text-center">Change (pts)</th><th class="text-center">Change (%)</th>
+                    <th>Rule</th><th>Result</th><th>Value Distribution</th>
+                </tr></thead><tbody>{"".join(rows)}</tbody></table></div></div>
+            </div>
+    """
+
+
+def _render_rules_in_effect(rules: list[dict[str, Any]]) -> str:
+    """Every rule in effect for this run: the ones that fired are highlighted, the rest dimmed."""
+    if not rules:
+        return ""
+    rows = []
+    for r in rules:
+        fired = r["fired"] > 0
+        label, color = _RESULT_META.get(r["worst"], _RESULT_META["ok"])
+        status = (f'<span class="chg-sev" style="color:{color};border-color:{color}">fired ×{r["fired"]}</span>'
+                  if fired else '<span class="chg-kind">not triggered</span>')
+        examples = ", ".join(html.escape(e) for e in r.get("examples", []))
+        rows.append(f"""<tr class="{'rule-row-fired' if fired else 'rule-row-idle'}">
+            <td>{html.escape(r['metric'].replace('_', ' '))}</td>
+            <td>{html.escape(_SCOPE_LABEL.get(r['scope'], r['scope']))}<div class="chg-kind">{html.escape(r['target'])}</div></td>
+            <td><span class="rule-chip{' rule-fired' if fired else ''}" style="--rc:{color}">{html.escape(r['threshold'])}</span></td>
+            <td>{status}</td>
+            <td class="chg-kind">{examples}</td>
+        </tr>""")
+    n_fired = sum(1 for r in rules if r["fired"])
+    return f"""
+        <details class="rules-in-effect" open>
+            <summary><b>Rules in effect</b> <span class="chg-kind">{n_fired} of {len(rules)} fired — highlighted;
+                the rest were checked and not triggered</span></summary>
+            <div class="table-container"><table class="data-table rules-table"><thead><tr>
+                <th>Metric</th><th>Scope</th><th>Threshold</th><th>Status</th><th>Fired on</th>
+            </tr></thead><tbody>{"".join(rows)}</tbody></table></div>
+        </details>
+    """
 
 
 def _render_change_summary(diff: Any, decision: dict[str, Any] | None, drift_report: dict[str, Any] | None,
@@ -927,14 +1015,14 @@ def _render_change_summary(diff: Any, decision: dict[str, Any] | None, drift_rep
         rule = f.get("rule") or {}
         rows.append(f"""<tr data-object="{html.escape(obj)}" data-severity="{sev}">
             <td><span class="chg-sev" style="color:{colors[sev]};border-color:{colors[sev]}">{labels[sev]}</span></td>
-            <td>{html.escape(area_of.get(kind, 'Other'))}<div class="chg-kind">{html.escape(kind.replace('_', ' '))}</div></td>
+            <td data-v="{html.escape(area_of.get(kind, 'Other'))} ({html.escape(kind.replace('_', ' '))})">{html.escape(area_of.get(kind, 'Other'))}<div class="chg-kind">{html.escape(kind.replace('_', ' '))}</div></td>
             <td><span class="object-name">{html.escape(obj)}</span></td>
             <td><code>{html.escape(f.get('field') or '—')}</code></td>
             <td class="chg-what">{html.escape(_short_message(f))}</td>
             <td class="text-center">{html.escape(_fmt_drift_value(kind, f.get('old')))}</td>
             <td class="text-center">{html.escape(_fmt_drift_value(kind, f.get('new')))}</td>
             <td class="text-center" style="color:{change_color};font-weight:600">{html.escape(change_txt)}</td>
-            <td class="chg-rule">{html.escape(str(rule.get('threshold', '')))}<div class="chg-kind">{html.escape(str(rule.get('scope', '')))}</div></td>
+            <td class="chg-rule" data-v="{html.escape(str(rule.get('threshold', '')))} ({html.escape(str(rule.get('scope', '')))})"><span class="rule-chip rule-fired" style="--rc:{colors[sev]}">{html.escape(str(rule.get('threshold', '')))}</span><div class="chg-kind">{html.escape(_SCOPE_LABEL.get(str(rule.get('scope', '')), str(rule.get('scope', ''))))}</div></td>
         </tr>""")
     summ = drift_report.get("summary", {})
     ref = (drift_report.get("reference") or {}).get("tag") or drift_report.get("mode")
@@ -951,7 +1039,16 @@ def _render_change_summary(diff: Any, decision: dict[str, Any] | None, drift_rep
                     .chg-table td {{ vertical-align:top; font-size:.84rem; }}
                     .chg-kind {{ font-size:.72rem; color:var(--text-tertiary); }}
                     .chg-what {{ min-width:260px; line-height:1.45; }}
-                    .chg-rule {{ font-size:.78rem; color:var(--text-secondary); min-width:140px; }}
+                    .chg-rule {{ font-size:.78rem; color:var(--text-secondary); min-width:150px; }}
+                    .rule-chip {{ display:inline-block; font-size:.74rem; padding:1px 8px; border-radius:6px;
+                                  border:1px dashed var(--border-secondary); color:var(--text-secondary); }}
+                    .rule-chip.rule-fired {{ border:1px solid var(--rc); color:var(--rc); font-weight:700;
+                                  background:color-mix(in srgb, var(--rc) 10%, transparent); }}
+                    .drift-table .rule-chip {{ white-space:nowrap; }}
+                    .rules-in-effect {{ margin-top:16px; }}
+                    .rules-in-effect > summary {{ cursor:pointer; margin-bottom:8px; }}
+                    .rule-row-idle td {{ opacity:.55; }}
+                    .rules-table td {{ font-size:.82rem; vertical-align:top; }}
                 </style>
                 <p style="color:var(--text-secondary);margin-top:0">
                     Compared with <b>{html.escape(str(ref))}</b>: <b>{summ.get('fail', 0)}</b> breach(es),
@@ -965,6 +1062,7 @@ def _render_change_summary(diff: Any, decision: dict[str, Any] | None, drift_rep
                         <th class="text-center">Change</th><th>Rule</th>
                     </tr></thead><tbody>{"".join(rows)}</tbody></table>
                 </div>
+                {_render_rules_in_effect(drift_report.get("rules_in_effect") or [])}
             </div>
         </div>
     """
@@ -1018,7 +1116,7 @@ def _drift_toolbar(present: list[tuple[str, str]]) -> str:
         </div>
         <style>
             .drift-toolbar {{ position:relative; z-index:5; }}
-            .export-menu {{ right:0; left:auto; min-width:250px; }}
+            .export-menu {{ right:0; left:auto; min-width:250px; max-height:none; overflow:visible; }}
             #trendsExportDropdown {{ position:relative; }}
             .export-menu-head {{ font-weight:700; font-size:.8rem; padding:4px 8px; color:var(--text-primary); }}
             .export-menu-actions {{ display:flex; gap:6px; padding:4px 8px; }}
@@ -1043,7 +1141,13 @@ _DRIFT_TOOLBAR_JS = """
     });
   });
   function visible(el){ return el.style.display !== 'none'; }
-  function text(el){ return el ? el.textContent.replace(/\\s+/g, ' ').trim() : ''; }
+  function text(el){
+    if (!el) return '';
+    if (el.dataset && el.dataset.v !== undefined) return el.dataset.v;
+    var parts = [];
+    el.childNodes.forEach(function(n){ var t = (n.textContent || '').replace(/\\s+/g, ' ').trim(); if (t) parts.push(t); });
+    return parts.join(' · ');
+  }
   document.getElementById('trendsExportDownload').addEventListener('click', function(){
     var chosen = {}; dd.querySelectorAll('#trendsExportOptions input:checked').forEach(function(cb){ chosen[cb.value] = true; });
     if (!Object.keys(chosen).length) { alert('Choose at least one section to export.'); return; }
@@ -1233,7 +1337,10 @@ def _render_trends_drift(
         """)
 
     # Coverage changes (field exists in both runs → show before/after distributions)
-    cov_changes = getattr(diff, "coverage_changes", [])
+    engine_cov = (drift_report or {}).get("coverage_changes")
+    if engine_cov:
+        sections.append(_render_coverage_shifts(engine_cov, prev_index, cur_index))
+    cov_changes = [] if engine_cov is not None and drift_report else getattr(diff, "coverage_changes", [])
     if cov_changes:
         rows = ""
         for c in cov_changes:
@@ -1378,12 +1485,7 @@ def _render_quality_tab(quality_data: Any) -> str:
 
     return f"""
         <div class="quality-overview">
-            <div class="overall-dqi">
-                <div class="overall-dqi-circle {get_quality_color(quality_data.overall_dqi)}">
-                    <span class="overall-score">{quality_data.overall_dqi:.1f}</span>
-                    <span class="overall-label">Overall DQI{tip("dqi")}</span>
-                </div>
-            </div>
+            {_render_dqi_dial(quality_data.overall_dqi)}
             {radar_html}
         </div>
         <div class="quality-grid">
@@ -1460,6 +1562,43 @@ def _get_score_color(score: float) -> str:
     return "var(--color-danger)"
 
 
+# ─── Overall DQI dial ───────────────────────────────────────────────────────
+
+def _render_dqi_dial(score: float) -> str:
+    """Overall DQI as a progress ring: the arc is the score out of 100, the value sits inside."""
+    import math
+
+    value = max(0.0, min(100.0, float(score or 0)))
+    size, stroke = 124, 10
+    r = (size - stroke) / 2 - 4
+    circumference = 2 * math.pi * r
+    filled = circumference * value / 100
+    color = _get_score_color(value)
+    grade = get_quality_grade(value)
+    label = f"Overall Data Quality Index {value:.1f} out of 100, grade {grade}"
+    return f"""
+        <div class="dqi-panel">
+            <h4 class="dqi-title">Data Quality Index{tip("dqi")}</h4>
+            <div class="dqi-dial" title="{label}">
+                <svg viewBox="0 0 {size} {size}" width="{size}" height="{size}" role="img" aria-label="{label}">
+                    <circle cx="{size / 2}" cy="{size / 2}" r="{r:.1f}" fill="none"
+                            stroke="var(--bg-tertiary)" stroke-width="{stroke}" />
+                    <circle cx="{size / 2}" cy="{size / 2}" r="{r:.1f}" fill="none" stroke="{color}"
+                            stroke-width="{stroke}" stroke-linecap="round"
+                            stroke-dasharray="{filled:.2f} {circumference:.2f}"
+                            transform="rotate(-90 {size / 2} {size / 2})" />
+                </svg>
+                <div class="dqi-center">
+                    <span class="dqi-value">{value:.1f}</span>
+                    <span class="dqi-kpi">DQI{tip("dqi")}</span>
+                    <span class="dqi-grade" style="border-color:{color};color:{color}">Grade {grade}</span>
+                </div>
+            </div>
+            <div class="dqi-caption">Overall score, out of 100</div>
+        </div>
+    """
+
+
 # ─── Schema Dimensions radar ────────────────────────────────────────────────
 
 def _render_schema_dimensions_radar(dimensions: dict[str, float]) -> str:
@@ -1480,8 +1619,8 @@ def _render_schema_dimensions_radar(dimensions: dict[str, float]) -> str:
         return f'<div class="schema-dimensions"><h4>Schema Dimensions</h4>{bars}</div>'
 
     import math
-    cx, cy, r = 230, 170, 115
-    width, height = 460, 340
+    cx, cy, r = 190, 108, 66
+    width, height = 380, 216
     angles = [(-math.pi / 2) + (2 * math.pi * i / n) for i in range(n)]
 
     # Ring guides
@@ -1500,14 +1639,14 @@ def _render_schema_dimensions_radar(dimensions: dict[str, float]) -> str:
             f'<line x1="{cx}" y1="{cy}" x2="{x2:.1f}" y2="{y2:.1f}" '
             f'stroke="var(--border-primary)" opacity="0.6" />'
         )
-        lx = cx + (r + 22) * math.cos(angle)
-        ly = cy + (r + 22) * math.sin(angle)
+        lx = cx + (r + 16) * math.cos(angle)
+        ly = cy + (r + 16) * math.sin(angle)
         anchor = "middle" if abs(math.cos(angle)) < 0.3 else ("start" if math.cos(angle) > 0 else "end")
         labels.append(
             f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}" '
-            f'dominant-baseline="middle" fill="var(--text-secondary)" font-size="11">'
+            f'dominant-baseline="middle" fill="var(--text-secondary)" font-size="12">'
             f'<tspan font-weight="600">{html.escape(name.capitalize())}</tspan>'
-            f'<tspan dx="4" fill="var(--accent-primary)" font-weight="700">{score:.0f}</tspan>'
+            f'<tspan dx="5" fill="var(--text-primary)" font-weight="700">{score:.0f}</tspan>'
             f'</text>'
         )
 
@@ -1517,16 +1656,25 @@ def _render_schema_dimensions_radar(dimensions: dict[str, float]) -> str:
         rr = r * max(0.0, min(100.0, score)) / 100
         pts.append(f"{cx + rr * math.cos(angle):.1f},{cy + rr * math.sin(angle):.1f}")
     poly = " ".join(pts)
+    # Hover targets: a dot per dimension with a tooltip (bigger invisible hit area).
+    dots = "".join(
+        f'<g><title>{html.escape(name.capitalize())}: {score:.1f} / 100</title>'
+        f'<circle cx="{pt.split(",")[0]}" cy="{pt.split(",")[1]}" r="10" fill="transparent" />'
+        f'<circle cx="{pt.split(",")[0]}" cy="{pt.split(",")[1]}" r="3.5" fill="var(--accent-primary)" '
+        f'stroke="var(--bg-secondary)" stroke-width="2" /></g>'
+        for (name, score), pt in zip(items, pts)
+    )
 
     return f"""
         <div class="schema-dimensions">
-            <h4>Schema Dimensions</h4>
+            <h4>Schema Dimensions{tip("dqi", "Each dimension's score (0–100) across all objects. Hover a point for its value; see How scores work for formulas and weights.")}</h4>
             <svg viewBox="0 0 {width} {height}" width="100%" style="max-width:{width}px;height:auto;"
                  role="img" aria-label="Schema dimensions radar">
                 {rings}
                 {"".join(axes)}
-                <polygon points="{poly}" fill="var(--accent-primary)" fill-opacity="0.25"
-                         stroke="var(--accent-primary)" stroke-width="2" />
+                <polygon points="{poly}" fill="var(--accent-primary)" fill-opacity="0.18"
+                         stroke="var(--accent-primary)" stroke-width="2" stroke-linejoin="round" />
+                {dots}
                 {"".join(labels)}
             </svg>
         </div>
@@ -2302,10 +2450,11 @@ def _render_field_explorer(objects: list[dict[str, Any]], pii_data: dict | None,
         for field in obj.get("fields", []):
             path = field.get("path", "")
             path_escaped = html.escape(path)
+            # True coverage (missing, null and empty all count against it); the
+            # Null/Empty column is the share of rows where the key exists but is empty.
             presence = field.get("presence_count", 0)
-            null_empty = field.get("null_empty_count", 0)
-            coverage_pct = (presence / sampled * 100) if sampled > 0 else 0
-            null_pct = (null_empty / presence * 100) if presence > 0 else 0
+            coverage_pct = true_coverage(field, sampled)
+            null_pct = null_empty_pct(field, sampled)
 
             types = field.get("types", {})
             type_badges = " ".join(
@@ -2340,13 +2489,8 @@ def _render_field_explorer(objects: list[dict[str, Any]], pii_data: dict | None,
                 pii_type = pii_lookup[pii_key]
                 pii_badge = f'<span class="pii-badge">🔒 {pii_type}</span>'
 
-            # Coverage styling
-            if coverage_pct >= 90:
-                cov_class = "coverage-high"
-            elif coverage_pct >= 50:
-                cov_class = "coverage-medium"
-            else:
-                cov_class = "coverage-low"
+            # Coverage styling: the same 5-band scale as the Coverage heatmap
+            cov_class = _coverage_band(coverage_pct)
 
             # Null/Empty styling (highlight cells with any null/empty values)
             if null_pct == 0:
@@ -2459,10 +2603,9 @@ def _render_coverage_heatmap(objects: list[dict[str, Any]]) -> str:
                 null_empty = field.get("null_empty_count", 0)
                 eff_count  = max(0, presence - null_empty)
                 coverage_pct = (eff_count / sampled * 100) if sampled > 0 else 0
-                color = _get_coverage_color(coverage_pct)
-                text_color = "#fff" if coverage_pct < 60 else "#000"
+                band = _coverage_band(coverage_pct)
                 cells.append(
-                    f"<td class='heatmap-cell' style='background-color: {color}; color: {text_color}'>"
+                    f"<td class='heatmap-cell {band}'>"
                     f"{coverage_pct:.0f}%</td>"
                 )
             else:
@@ -2473,11 +2616,11 @@ def _render_coverage_heatmap(objects: list[dict[str, Any]]) -> str:
     return f"""
         <div class="heatmap-legend">
             <span>Coverage:</span>
-            <span class="legend-item" style="background: var(--color-danger)">0-25%</span>
-            <span class="legend-item" style="background: var(--color-caution)">25-50%</span>
-            <span class="legend-item" style="background: var(--color-warning)">50-75%</span>
-            <span class="legend-item" style="background: var(--color-info)">75-90%</span>
-            <span class="legend-item" style="background: var(--color-success)">90-100%</span>
+            <span class="legend-item cov-band cov-l1">0-25%</span>
+            <span class="legend-item cov-band cov-l2">25-50%</span>
+            <span class="legend-item cov-band cov-l3">50-75%</span>
+            <span class="legend-item cov-band cov-l4">75-90%</span>
+            <span class="legend-item cov-band cov-l5">90-100%</span>
         </div>
         <div class="heatmap-container">
             <table class="heatmap-table">
@@ -2492,17 +2635,17 @@ def _render_coverage_heatmap(objects: list[dict[str, Any]]) -> str:
     """
 
 
-def _get_coverage_color(pct: float) -> str:
-    """Get heatmap color for coverage percentage."""
+def _coverage_band(pct: float) -> str:
+    """The one coverage scale used everywhere: CSS class of a soft tinted band."""
     if pct >= 90:
-        return "#22c55e"  # Green
+        return "cov-band cov-l5"   # good
     if pct >= 75:
-        return "#3b82f6"  # Blue
+        return "cov-band cov-l4"   # info
     if pct >= 50:
-        return "#eab308"  # Yellow
+        return "cov-band cov-l3"   # warning
     if pct >= 25:
-        return "#f97316"  # Orange
-    return "#ef4444"  # Red
+        return "cov-band cov-l2"   # caution
+    return "cov-band cov-l1"       # critical
 
 
 def _render_distributions(objects: list[dict[str, Any]], schema_json: dict | None = None, statistics_data: dict | None = None) -> str:
@@ -3331,14 +3474,14 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             --transition-slow: 400ms ease;
 
             /* Semantic colors (shared) */
-            --color-success: #22c55e;
+            --color-success: #63b98c;
             --color-success-light: #86efac;
-            --color-info: #3b82f6;
+            --color-info: #6f9ad8;
             --color-info-light: #93c5fd;
-            --color-warning: #eab308;
+            --color-warning: #d6bd5c;
             --color-warning-light: #fde047;
-            --color-caution: #f97316;
-            --color-danger: #ef4444;
+            --color-caution: #e0965a;
+            --color-danger: #e47a90;
             --color-danger-light: #fca5a5;
         }}
 
@@ -3369,6 +3512,20 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
 
             --header-bg: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+
+            /* Status colours, softened for night mode (lighter, desaturated) */
+            --color-success: #63b98c;
+            --color-info: #6f9ad8;
+            --color-warning: #d6bd5c;
+            --color-caution: #e0965a;
+            --color-danger: #e47a90;
+            /* Ink for text on tinted status backgrounds */
+            --ink-success: #a3dcbd;
+            --ink-info: #b2cbef;
+            --ink-warning: #ecdc9a;
+            --ink-caution: #f2c39a;
+            --ink-danger: #f4b0bf;
+            --tint: 22%;
         }}
 
         /* ═══ LIGHT THEME (Day Mode) ═══ */
@@ -3396,6 +3553,20 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
             --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
             --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+
+            /* Status colours, softened for day mode (deeper, desaturated) */
+            --color-success: #2f8f62;
+            --color-info: #3f74c4;
+            --color-warning: #b0901f;
+            --color-caution: #cf7a2f;
+            --color-danger: #c4475f;
+            /* Ink for text on tinted status backgrounds */
+            --ink-success: #1d6343;
+            --ink-info: #284f8c;
+            --ink-warning: #6f5a0c;
+            --ink-caution: #8c4a17;
+            --ink-danger: #9a2f45;
+            --tint: 16%;
 
             --header-bg: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
         }}
@@ -4112,20 +4283,18 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             border-radius: var(--radius-sm);
         }}
 
-        .coverage-high {{
-            background: var(--color-success);
-            color: #000;
-        }}
-
-        .coverage-medium {{
-            background: var(--color-warning);
-            color: #000;
-        }}
-
-        .coverage-low {{
-            background: var(--color-danger);
-            color: #fff;
-        }}
+        /* One coverage scale (heatmap, field explorer, drift tables): soft tints + readable ink */
+        .cov-band {{ font-weight: 600; }}
+        .cov-l5 {{ background: color-mix(in srgb, var(--color-success) var(--tint), var(--bg-card)) !important; color: var(--ink-success) !important; }}
+        .cov-l4 {{ background: color-mix(in srgb, var(--color-info) var(--tint), var(--bg-card)) !important; color: var(--ink-info) !important; }}
+        .cov-l3 {{ background: color-mix(in srgb, var(--color-warning) var(--tint), var(--bg-card)) !important; color: var(--ink-warning) !important; }}
+        .cov-l2 {{ background: color-mix(in srgb, var(--color-caution) var(--tint), var(--bg-card)) !important; color: var(--ink-caution) !important; }}
+        .cov-l1 {{ background: color-mix(in srgb, var(--color-danger) var(--tint), var(--bg-card)) !important; color: var(--ink-danger) !important; }}
+        .coverage-badge.cov-band {{ border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }}
+        /* legacy class names kept for compatibility */
+        .coverage-high {{ background: color-mix(in srgb, var(--color-success) var(--tint), var(--bg-card)); color: var(--ink-success); }}
+        .coverage-medium {{ background: color-mix(in srgb, var(--color-warning) var(--tint), var(--bg-card)); color: var(--ink-warning); }}
+        .coverage-low {{ background: color-mix(in srgb, var(--color-danger) var(--tint), var(--bg-card)); color: var(--ink-danger); }}
 
         /* Null/Empty Cell Highlighting */
         .null-cell {{
@@ -4409,10 +4578,31 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
            QUALITY TAB
            ═══════════════════════════════════════════════════════════════════════ */
         .quality-overview {{
-            display: flex;
-            justify-content: center;
-            margin-bottom: var(--space-md);
+            display: grid;
+            grid-template-columns: minmax(200px, 250px) minmax(0, 1fr);
+            gap: var(--space-lg);
+            align-items: stretch;
+            margin-bottom: var(--space-lg);
         }}
+        @media (max-width: 900px) {{ .quality-overview {{ grid-template-columns: 1fr; }} }}
+        .dqi-panel {{
+            display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+            gap: var(--space-sm); padding: var(--space-md) var(--space-lg);
+            background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: var(--radius-lg);
+        }}
+        .dqi-title {{ margin: 0 0 var(--space-sm) 0; align-self: flex-start; font-size: 1rem; }}
+        .dqi-dial {{ position: relative; width: 124px; height: 124px; margin: auto 0; }}
+        .dqi-dial svg {{ display: block; }}
+        .dqi-center {{
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 2px;
+        }}
+        .dqi-value {{ font-size: 1.6rem; font-weight: 800; line-height: 1; color: var(--text-primary);
+                      font-variant-numeric: tabular-nums; letter-spacing: -1px; }}
+        .dqi-kpi {{ font-size: .68rem; font-weight: 700; letter-spacing: .14em; color: var(--text-secondary); }}
+        .dqi-grade {{ margin-top: 3px; font-size: .62rem; font-weight: 700; border: 1px solid;
+                      border-radius: 999px; padding: 1px 10px; }}
+        .dqi-caption {{ font-size: .8rem; color: var(--text-tertiary); text-align: center; }}
 
         .overall-dqi-circle {{
             display: flex;
@@ -4747,15 +4937,16 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
 
         /* New: Schema dimensions radar + Insights/SWOT/Recommendations + Patterns + Joins + Similar */
         .schema-dimensions {{
-            margin-left: var(--space-lg);
-            padding: var(--space-md);
+            padding: var(--space-md) var(--space-lg);
             background: var(--bg-secondary);
-            border-radius: 8px;
-            display: inline-flex;
+            border: 1px solid var(--border-primary);
+            border-radius: var(--radius-lg);
+            display: flex;
             flex-direction: column;
             align-items: center;
+            min-width: 0;
         }}
-        .schema-dimensions h4 {{ margin: 0 0 var(--space-sm) 0; }}
+        .schema-dimensions h4 {{ margin: 0 0 var(--space-sm) 0; align-self: flex-start; font-size: 1rem; }}
 
         .insights-section h3 {{ margin-top: var(--space-lg); }}
         .data-story {{
@@ -5573,9 +5764,9 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             justify-content: center;
             background: rgba(0,0,0,0.2);
         }}
-        .cover-verdict-ring.healthy {{ border-color: #22c55e; }}
-        .cover-verdict-ring.attention {{ border-color: #eab308; }}
-        .cover-verdict-ring.risk {{ border-color: #ef4444; }}
+        .cover-verdict-ring.healthy {{ border-color: var(--color-success); }}
+        .cover-verdict-ring.attention {{ border-color: var(--color-warning); }}
+        .cover-verdict-ring.risk {{ border-color: var(--color-danger); }}
         .cover-verdict-score {{
             font-size: 1.8rem;
             font-weight: 800;

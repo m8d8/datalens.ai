@@ -61,6 +61,21 @@
       "kind": "orphans",
       "change": "2% of deliveries.bowler_id point to unknown players",
       "expected_detection": "referential-integrity drift"
+    },
+    {
+      "kind": "nulls",
+      "change": "matches.city blank in 25% of matches",
+      "expected_detection": "coverage drift in a second object"
+    },
+    {
+      "kind": "coverage_up",
+      "change": "matches.attendance filled for 63.2% of matches (day 1: 40%) \u2014 +58%",
+      "expected_detection": "coverage increase above the 50% rule"
+    },
+    {
+      "kind": "coverage_up",
+      "change": "deliveries.shot_type filled for 56% of deliveries (day 1: 50%) \u2014 +12%",
+      "expected_detection": "coverage increase within the rule"
     }
   ],
   "daily_feed": {
