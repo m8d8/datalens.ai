@@ -21,8 +21,12 @@ Pure data-driven inference. Three layers:
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from datalens.profiling.sampler import ProfileScratch
 
 
 @dataclass
@@ -95,6 +99,41 @@ def _coverage(field_data: dict[str, Any], sampled: int) -> float:
     nulls = field_data.get("null_empty_count", 0)
     eff = max(0, presence - nulls)
     return (eff / sampled) if sampled else 0.0
+
+
+def _scratch_hashes(
+    scratch: "ProfileScratch | None", obj_name: str, path: str
+) -> Counter | None:
+    """Exact value-hash counts for a field, or None when unavailable / over the tracking limit."""
+    if scratch is None or path in scratch.overflow.get(obj_name, ()):
+        return None
+    hashes = scratch.field_hashes(obj_name, path)
+    return hashes if hashes else None
+
+
+def _containment(child: Counter | set, shared: set) -> float:
+    """Share of the child's occurrences (row-weighted when counts are known) found in `shared`."""
+    if isinstance(child, Counter):
+        total = sum(child.values())
+        return (sum(child[h] for h in shared) / total) if total else 0.0
+    return (len(shared) / len(child)) if child else 0.0
+
+
+def _shared_examples(a_field: dict[str, Any], b_field: dict[str, Any], limit: int = 5) -> list[str]:
+    """Readable shared values (from the displayed top values on both sides)."""
+    a_keys = set((a_field.get("value_counts") or {}).keys()) | {str(v) for v in a_field.get("examples") or []}
+    b_keys = set((b_field.get("value_counts") or {}).keys()) | {str(v) for v in b_field.get("examples") or []}
+    return sorted(a_keys & b_keys)[:limit]
+
+
+def _get_path(record: Any, path: str) -> Any:
+    """Value at a dotted scalar path in a raw record (None if absent)."""
+    cur = record
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
 
 
 def _distinct_set(field_data: dict[str, Any]) -> set[Any]:
@@ -362,6 +401,8 @@ def _eligible_join_fields(
 def find_value_confirmed_joins(
     schema_json: dict[str, Any],
     min_jaccard: float = 0.15,
+    scratch: "ProfileScratch | None" = None,
+    min_containment: float = 0.8,
 ) -> list[JoinCandidate]:
     """
     Cross-object join candidates using TWO tracks, top-level-first.
@@ -377,6 +418,11 @@ def find_value_confirmed_joins(
       Signal: same semantic type, similar cardinality profile, identifier-shaped name,
       high coverage.  Labelled "structural candidate" — not "value confirmed".
       Explicitly notes that users should re-run with higher --max-distinct to confirm.
+
+    When a ProfileScratch is supplied, every field has an exact value-hash set, so
+    Track A applies to high-cardinality fields too, and a pair also qualifies when
+    one side's values are (row-weighted) contained in the other's — the normal
+    shape of a foreign key into a larger dimension (Jaccard alone would be low).
 
     Scan order: top-level (depth 0) first; one level deep (depth 1) only if no
     cross-object pair is linked at depth 0.
@@ -412,9 +458,14 @@ def find_value_confirmed_joins(
                 continue
             distinct = f.get("distinct_count_in_sample", 0)
             ratio = distinct / sampled if sampled else 0.0
-            capped = _is_capped(f, sampled)
-            vals = None if capped else _distinct_set(f)
+            hashed = _scratch_hashes(scratch, name, path)
+            if hashed is not None:
+                capped, vals = False, hashed
+            else:
+                capped = _is_capped(f, sampled)
+                vals = None if capped else _distinct_set(f)
             result.append({
+                "field": f,
                 "obj": name,
                 "path": path,
                 "cov": cov,
@@ -457,6 +508,11 @@ def find_value_confirmed_joins(
 
                         same_path = _path_signature(af["path"]) == _path_signature(bf["path"])
                         id_bias = max(af["id_bias"], bf["id_bias"])
+                        # Small integer measures (counts, positions) overlap by accident;
+                        # numeric joins need identifier-shaped names on both sides.
+                        if (af["type_sig"] in ("int", "float") and not same_path
+                                and min(af["id_bias"], bf["id_bias"]) <= 1.0):
+                            continue
 
                         # Track A: value Jaccard — both uncapped, values available
                         if not af["capped"] and not bf["capped"]:
@@ -464,22 +520,32 @@ def find_value_confirmed_joins(
                             b_vals = bf["vals"] or set()
                             if len(a_vals) < 5 or len(b_vals) < 5:
                                 continue
-                            inter = a_vals & b_vals
+                            a_keys, b_keys = set(a_vals), set(b_vals)
+                            inter = a_keys & b_keys
                             if not inter:
                                 continue
-                            union = a_vals | b_vals
+                            union = a_keys | b_keys
                             jaccard = len(inter) / len(union)
-                            if jaccard < min_jaccard:
+                            contained = max(_containment(a_vals, inter), _containment(b_vals, inter))
+                            fk_shaped = contained >= min_containment and (id_bias > 1.0 or same_path)
+                            if jaccard < min_jaccard and not fk_shaped:
                                 continue
-                            conf = min(1.0, jaccard * 0.7 + min(af["cov"], bf["cov"]) * 0.3)
+                            strength = max(jaccard, contained if fk_shaped else 0.0)
+                            conf = min(1.0, strength * 0.7 + min(af["cov"], bf["cov"]) * 0.3)
                             if id_bias > 1.0:
                                 conf = min(1.0, conf + 0.12)
                             if same_path:
                                 conf = min(1.0, conf + 0.05)
-                            shared = sorted(str(v) for v in list(inter)[:5])
+                            shared = (
+                                _shared_examples(af["field"], bf["field"])
+                                if isinstance(a_vals, Counter)
+                                else sorted(str(v) for v in list(inter)[:5])
+                            )
                             ev = [
                                 f"Value overlap Jaccard {jaccard:.0%} "
-                                f"({len(inter)} shared / {len(union)} sampled distinct)",
+                                f"({len(inter)} shared / {len(union)} distinct values)",
+                                f"Containment {contained:.0%} (share of the smaller side's "
+                                f"occurrences found on the other side)",
                                 f"Shared sample: {shared}",
                                 f"Coverage {af['cov']:.0%} / {bf['cov']:.0%}",
                             ]
@@ -577,6 +643,9 @@ def find_intra_object_duplicates(
     schema_json: dict[str, Any],
     min_jaccard: float = 0.6,
     min_coverage: float = 0.5,
+    scratch: "ProfileScratch | None" = None,
+    shared_domains: list[dict[str, Any]] | None = None,
+    min_row_equality: float = 0.9,
 ) -> list[DuplicateFieldCandidate]:
     """
     Find fields within the same object whose VALUES look nearly identical — likely duplicates.
@@ -587,6 +656,12 @@ def find_intra_object_duplicates(
 
     Audit, temporal, and noise fields are excluded.
     Only returns pairs where coverage on both sides is >= min_coverage.
+
+    With a ProfileScratch, value-overlapping pairs are also checked row by row on
+    the in-memory row sample: two fields are only duplicates when they hold the
+    *same value in the same row* (>= min_row_equality). Fields that share a value
+    set but differ per row (e.g. batter_id vs non_striker_id — two roles pointing
+    at the same entity) are appended to `shared_domains` instead.
     """
     max_distinct = schema_json.get("config", {}).get("max_distinct_values", 50)
     results: list[DuplicateFieldCandidate] = []
@@ -610,10 +685,15 @@ def find_intra_object_duplicates(
             if cov < min_coverage:
                 continue
             distinct = f.get("distinct_count_in_sample", 0)
-            capped = (distinct >= max_distinct and
-                      (f.get("presence_count", 0) or sampled) > max_distinct * 2)
-            vals = None if capped else _distinct_set(f)
+            hashed = _scratch_hashes(scratch, obj_name, path)
+            if hashed is not None:
+                capped, vals = False, set(hashed)
+            else:
+                capped = (distinct >= max_distinct and
+                          (f.get("presence_count", 0) or sampled) > max_distinct * 2)
+                vals = None if capped else _distinct_set(f)
             eligible.append({
+                "field": f,
                 "path": path,
                 "types": types,
                 "type_sig": _struct_type_sig(types),
@@ -647,12 +727,45 @@ def find_intra_object_duplicates(
                     if jaccard < min_jaccard:
                         continue
                     conf = min(1.0, jaccard * 0.8 + min(af["cov"], bf["cov"]) * 0.2)
-                    shared_sample = sorted(str(v) for v in list(inter)[:5])
+                    shared_sample = (
+                        _shared_examples(af["field"], bf["field"])
+                        if scratch is not None
+                        else sorted(str(v) for v in list(inter)[:5])
+                    )
                     ev = [
                         f"Value Jaccard {jaccard:.0%} ({len(inter)} shared / {len(union)} union)",
                         f"Shared sample: {shared_sample}",
                         f"Coverage: {af['cov']:.0%} (a) vs {bf['cov']:.0%} (b)",
                     ]
+                    rows = scratch.rows.get(obj_name) if scratch is not None else None
+                    if rows and "[]" not in af["path"] + bf["path"]:
+                        both = equal = 0
+                        for rec in rows:
+                            va, vb = _get_path(rec, af["path"]), _get_path(rec, bf["path"])
+                            if va is None or vb is None:
+                                continue
+                            both += 1
+                            equal += va == vb
+                        if both:
+                            row_eq = equal / both
+                            if row_eq < min_row_equality:
+                                numeric = af["type_sig"] in ("int", "float")
+                                id_like = min(_identifier_bias(af["path"]), _identifier_bias(bf["path"])) > 1.0
+                                if shared_domains is not None and (id_like or not numeric):
+                                    shared_domains.append({
+                                        "object": obj_name,
+                                        "field_a": af["path"],
+                                        "field_b": bf["path"],
+                                        "jaccard": round(jaccard, 3),
+                                        "row_equality": round(row_eq, 3),
+                                        "note": (
+                                            "Same set of values but different per row — likely two "
+                                            "roles referencing the same entity, not a duplicate."
+                                        ),
+                                    })
+                                continue
+                            ev.append(f"Same value in the same row for {row_eq:.0%} of {both} rows checked")
+                            conf = min(1.0, conf * 0.5 + row_eq * 0.5)
                     kind = "value_duplicate"
                     jaccard_val = jaccard
 
@@ -719,12 +832,136 @@ def _struct_type_sig(types: set[str]) -> str:
     return str(sorted(types))
 
 
-def analyze_joins(schema_json: dict[str, Any]) -> dict[str, Any]:
+def find_referential_integrity(
+    schema_json: dict[str, Any],
+    primary_keys: list[PrimaryKeyCandidate],
+    scratch: "ProfileScratch | None",
+    min_containment: float = 0.5,
+) -> list[dict[str, Any]]:
+    """
+    Foreign-key → primary-key links with their orphan rate.
+
+    For every single-field primary key (the parent) and every scalar field in
+    another object with a compatible type (the child), measure how many of the
+    child's occurrences resolve to a parent key. A child qualifies as a foreign
+    key when at least `min_containment` of its occurrences resolve; everything
+    that doesn't resolve is an orphan (a reference to a row that doesn't exist).
+
+    Needs exact value hashes (ProfileScratch); returns [] without them.
+    Numeric children must also have an identifier-shaped name, so a small
+    integer measure (e.g. quantity 1..10) isn't mistaken for a reference into
+    an integer id range.
+    """
+    if scratch is None:
+        return []
+    objs = {o.get("object", ""): o for o in schema_json.get("objects", [])}
+
+    # Parents: every top-level field that is unique per row (not only the chosen
+    # primary key) — an object can carry several unique keys (internal id,
+    # external code), and the one other objects reference is the one that matters.
+    parents = []
+    for obj_name, obj in objs.items():
+        sampled = obj.get("sampled", 0)
+        for f in obj.get("fields", []):
+            path = f.get("path", "")
+            if "." in path or "[]" in path or not sampled:
+                continue
+            ptypes = set(f.get("types", {})) - {"null"}
+            if not ptypes or {"object", "array"} & ptypes:
+                continue
+            if _coverage(f, sampled) < 0.95 or f.get("distinct_count_in_sample", 0) / sampled < 0.95:
+                continue
+            keys = _scratch_hashes(scratch, obj_name, path)
+            if keys:
+                parents.append((obj_name, path, set(keys), _struct_type_sig(ptypes)))
+
+    links: list[dict[str, Any]] = []
+    for obj_name, obj in objs.items():
+        for f in obj.get("fields", []):
+            path = f.get("path", "")
+            types = set(f.get("types", {}).keys()) - {"null"}
+            if not types or {"object", "array"} & types or _is_audit_field(path, types):
+                continue
+            child = _scratch_hashes(scratch, obj_name, path)
+            if not child or len(child) < 3:
+                continue
+            sig = _struct_type_sig(types)
+            if sig in ("int", "float") and _identifier_bias(path) <= 1.0:
+                continue
+            best = None
+            for p_obj, p_path, p_keys, p_sig in parents:
+                if p_obj == obj_name or p_sig != sig:
+                    continue
+                shared = set(child) & p_keys
+                if len(shared) < min(10, max(2, len(p_keys) // 2)):
+                    continue
+                contained = _containment(child, shared)
+                if contained < min_containment:
+                    continue
+                if best is None or contained > best[0]:
+                    best = (contained, p_obj, p_path, shared)
+            if best is None:
+                continue
+            contained, p_obj, p_path, shared = best
+            total = sum(child.values())
+            links.append({
+                "child": f"{obj_name}.{path}",
+                "parent": f"{p_obj}.{p_path}",
+                "child_occurrences": total,
+                "orphan_occurrences": total - sum(child[h] for h in shared),
+                "orphan_distinct": len(child) - len(shared),
+                "orphan_pct": round((1 - contained) * 100, 2),
+                "resolved_pct": round(contained * 100, 2),
+            })
+    links.sort(key=lambda x: (-x["orphan_pct"], x["child"]))
+    return links
+
+
+def _prefer_referenced_keys(
+    pks: list[PrimaryKeyCandidate], integrity: list[dict[str, Any]]
+) -> list[PrimaryKeyCandidate]:
+    """When several fields are unique, prefer the one other objects actually reference."""
+    refs: dict[tuple[str, str], int] = {}
+    for link in integrity:
+        obj, _, path = link["parent"].partition(".")
+        refs[(obj, path)] = refs.get((obj, path), 0) + 1
+    out = []
+    for pk in pks:
+        best = max(
+            ((path, n) for (obj, path), n in refs.items() if obj == pk.object_name),
+            key=lambda item: item[1],
+            default=None,
+        )
+        current = refs.get((pk.object_name, pk.fields[0]), 0) if len(pk.fields) == 1 else 0
+        if best and best[0] not in pk.fields and best[1] > current:
+            pk = PrimaryKeyCandidate(
+                object_name=pk.object_name,
+                fields=[best[0]],
+                coverage=1.0,
+                distinct_ratio=1.0,
+                rationale=(
+                    f"`{best[0]}` is unique per row and is referenced by {best[1]} field(s) in "
+                    f"other objects — the key the rest of the data joins on."
+                ),
+            )
+        out.append(pk)
+    return out
+
+
+def analyze_joins(
+    schema_json: dict[str, Any],
+    scratch: "ProfileScratch | None" = None,
+) -> dict[str, Any]:
     """Top-level orchestration of all join/key inference."""
     pks = infer_primary_keys(schema_json)
-    value_joins = find_value_confirmed_joins(schema_json)
+    value_joins = find_value_confirmed_joins(schema_json, scratch=scratch)
     nested = find_nested_relationships(schema_json)
-    duplicates = find_intra_object_duplicates(schema_json)
+    shared_domains: list[dict[str, Any]] = []
+    duplicates = find_intra_object_duplicates(
+        schema_json, scratch=scratch, shared_domains=shared_domains,
+    )
+    integrity = find_referential_integrity(schema_json, pks, scratch)
+    pks = _prefer_referenced_keys(pks, integrity)
     # Split by kind for backward-compat keys consumed by the HTML renderer.
     same_path = [c for c in value_joins if c.kind == "value_confirmed_same_path"]
     overlap = [c for c in value_joins if c.kind == "value_confirmed_overlap"]
@@ -734,11 +971,15 @@ def analyze_joins(schema_json: dict[str, Any]) -> dict[str, Any]:
         "value_overlap": [c.to_dict() for c in overlap],
         "all_value_joins": [c.to_dict() for c in value_joins],
         "intra_duplicates": [d.to_dict() for d in duplicates],
+        "shared_domains": shared_domains,
+        "referential_integrity": integrity,
         "nested_relationships": nested,
         "totals": {
             "primary_keys": len(pks),
             "value_confirmed_joins": len(value_joins),
             "intra_duplicates": len(duplicates),
             "nested_relationships": len(nested),
+            "foreign_keys": len(integrity),
+            "orphaned_links": sum(1 for link in integrity if link["orphan_occurrences"]),
         },
     }

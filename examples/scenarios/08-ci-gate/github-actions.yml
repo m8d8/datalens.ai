@@ -1,0 +1,25 @@
+# .github/workflows/data-quality.yml — profile the nightly export and gate on drift/quality
+name: data-quality
+on:
+  schedule: [{cron: "30 2 * * *"}]
+  workflow_dispatch: {}
+jobs:
+  datalens:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Restore history (the rolling baseline learns from it)
+        uses: actions/cache@v4
+        with: {path: output/.history, key: datalens-history-${{ github.run_id }}, restore-keys: datalens-history-}
+      - name: Profile and gate
+        run: |
+          uv run datalens analyze --cc nightly_export -o output \
+            --version-tag "$(date +%F)" --run-date "$(date +%F)" \
+            --compare-to rolling --fail-on fail \
+            --min-score health=70,dqi=85 --max-drop dqi=5 \
+            --schema expected.schema.json \
+            --notify "slack:${{ secrets.SLACK_WEBHOOK }}" --format json > datalens-summary.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: datalens-report, path: "output/**/*-datalens-*"}

@@ -7,6 +7,7 @@ Complete examples for all supported data source types. Copy any example and cust
 - **HTTP/REST APIs** — Bearer Token, Basic Auth, API Key
 - **MongoDB** — Atlas Cloud, Local/Self-Hosted
 - **Amazon S3** — S3 Data Lakes
+- **Google BigQuery** — tables, views, queries
 - **Local Files** — CSV, JSON, JSONL (gzip/zip), XML, Excel
 
 ---
@@ -81,6 +82,22 @@ For analyzing data stored in Amazon S3 buckets.
 export AWS_ACCESS_KEY_ID="AKIA..."
 export AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI..."
 datalens analyze --cc s3_data_lake
+```
+
+---
+
+## Google BigQuery
+
+### Dataset (tables, views, queries)
+📄 [bigquery.yaml](bigquery.yaml)
+
+Read-only: samples tables with `TABLESAMPLE SYSTEM` (billed only for sampled blocks), caps every job with
+`max_bytes_billed`, and takes row counts from free table metadata. Needs `pip install 'datalens-ai[bigquery]'`.
+
+```bash
+gcloud auth application-default login      # or a service-account credentials_file
+export GCP_PROJECT=my-project
+datalens analyze --cc bigquery_sales
 ```
 
 ---
@@ -298,4 +315,4 @@ datalens analyze --cc my_api --debug
 4. Run `datalens connection-list` to verify
 5. Analyze: `datalens analyze --cc your_connection_name`
 
-For more details, see [README_CONNECTION_CONFIG.md](../../README_CONNECTION_CONFIG.md)
+For more details, see the [Connection Config Guide](../../docs/CONNECTION_CONFIG.md)

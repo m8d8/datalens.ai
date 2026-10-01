@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from datalens.profiling.coverage import coverage_pct
+
 
 def build_analysis_context(
     schema_json: dict[str, Any],
@@ -17,9 +19,11 @@ def build_analysis_context(
     pii_summary: dict[str, Any] | None = None,
     insights: dict[str, Any] | None = None,
     decision: dict[str, Any] | None = None,
+    drift: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate deterministic findings for the AI prompt."""
     return {
+        "drift": drift or {},
         "schema": schema_json,
         "patterns": patterns or {},
         "quality": quality or {},
@@ -38,13 +42,21 @@ def summarize_schema_for_prompt(objects: list[dict[str, Any]], *, max_fields: in
         obj_name = obj.get("object", "Unknown")
         sampled = obj.get("sampled", 0)
         fields = obj.get("fields", [])
-        lines.append(f"\n## {obj_name} ({sampled} records sampled, {len(fields)} fields)")
+        total = obj.get("total_rows")
+        rows = f"{total} rows, " if total is not None else ""
+        lines.append(f"\n## {obj_name} ({rows}{sampled} records sampled, {len(fields)} fields)")
         for field in fields[:max_fields]:
             path = field.get("path", "")
             types = ", ".join(field.get("types", {}).keys())
-            coverage = field.get("presence_count", 0) / max(sampled, 1) * 100
+            filled_pct = coverage_pct(field, sampled)
             distinct = field.get("distinct_count_in_sample", "?")
-            lines.append(f"- {path}: types=[{types}], coverage={coverage:.0f}%, distinct={distinct}")
+            if field.get("distinct_is_exact") is False:
+                distinct = f">={distinct}"
+            masked = " (PII, values masked)" if field.get("masked") else ""
+            lines.append(
+                f"- {path}: types=[{types}], coverage={filled_pct:.0f}% (missing/null/empty excluded), "
+                f"distinct={distinct}{masked}"
+            )
         if len(fields) > max_fields:
             lines.append(f"- ... and {len(fields) - max_fields} more fields")
     return "\n".join(lines)
@@ -94,18 +106,32 @@ def summarize_analytics_for_prompt(ctx: dict[str, Any]) -> str:
 
     joins = ctx.get("joins") or {}
     pk = joins.get("primary_keys", []) if isinstance(joins, dict) else []
-    fk = joins.get("foreign_key_candidates", []) if isinstance(joins, dict) else []
+    fk = joins.get("referential_integrity", []) if isinstance(joins, dict) else []
     if pk:
         parts.append(f"Primary key candidates: {len(pk)}")
         for item in pk[:8]:
-            parts.append(f"  - {item.get('object', '')}.{item.get('field', item.get('path', ''))}")
-    if fk:
-        parts.append(f"Cross-object FK candidates: {len(fk)}")
-        for item in fk[:8]:
+            fields = item.get("fields") or [item.get("field", item.get("path", ""))]
             parts.append(
-                f"  - {item.get('from_object', '')}.{item.get('from_field', '')} "
-                f"→ {item.get('to_object', '')}.{item.get('to_field', '')}"
+                f"  - {item.get('object', '')}: ({', '.join(fields)}) "
+                f"distinct ratio {item.get('distinct_ratio', 0):.0%}"
             )
+    if fk:
+        parts.append(f"Foreign keys (value-verified, with orphan rate): {len(fk)}")
+        for item in fk[:12]:
+            parts.append(
+                f"  - {item.get('child')} → {item.get('parent')}: "
+                f"{item.get('orphan_pct', 0)}% orphaned ({item.get('orphan_distinct', 0)} unknown values)"
+            )
+    shared = joins.get("shared_domains", []) if isinstance(joins, dict) else []
+    if shared:
+        parts.append("Fields sharing a value domain but differing per row (role-playing references):")
+        for item in shared[:6]:
+            parts.append(f"  - {item.get('object')}: {item.get('field_a')} / {item.get('field_b')}")
+
+    drift = ctx.get("drift") or {}
+    if drift:
+        parts.append("Changes since the previous run (drift):")
+        parts.append(_summarize_drift(drift))
 
     insights = ctx.get("insights") or {}
     recs = insights.get("recommendations", []) if isinstance(insights, dict) else []
@@ -118,3 +144,31 @@ def summarize_analytics_for_prompt(ctx: dict[str, Any]) -> str:
                 parts.append(f"  - {r}")
 
     return "\n".join(parts)
+
+
+def _summarize_drift(drift: dict[str, Any], limit: int = 25) -> str:
+    """Compact text of schema/coverage drift so the model can reason about what changed."""
+    lines: list[str] = []
+    schema = drift.get("schema") or {}
+    for obj in schema.get("added_objects", []):
+        lines.append(f"  - object added: {obj}")
+    for obj in schema.get("removed_objects", []):
+        lines.append(f"  - object removed: {obj}")
+    for obj, fields in (schema.get("added_fields") or {}).items():
+        lines.append(f"  - {obj}: fields added {', '.join(fields)}")
+    for obj, fields in (schema.get("removed_fields") or {}).items():
+        lines.append(f"  - {obj}: fields removed {', '.join(fields)}")
+    for tc in schema.get("type_changes", []):
+        lines.append(
+            f"  - {tc.get('object')}.{tc.get('field')}: type {tc.get('old_types')} → {tc.get('new_types')}"
+        )
+    for cc in (drift.get("coverage") or {}).get("coverage_changes", []):
+        lines.append(
+            f"  - {cc.get('object')}.{cc.get('field')}: coverage {cc.get('old_coverage', 0):.1f}% → "
+            f"{cc.get('new_coverage', 0):.1f}%"
+        )
+    for item in drift.get("highlights", []):
+        lines.append(f"  - {item}")
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"  - ... and {len(lines) - limit} more changes"]
+    return "\n".join(lines) if lines else "  - no changes detected"

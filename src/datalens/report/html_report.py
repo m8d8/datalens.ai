@@ -30,6 +30,18 @@ from datalens.profiling.relationships import analyze_relationships, generate_rel
 from datalens.profiling.statistics import compute_statistics_summary
 from datalens.profiling.patterns import analyze_patterns
 from datalens.profiling.joins import analyze_joins
+from datalens.report.sections import (
+    CHAT_OFFLINE_HTML,
+    render_action_plan,
+    render_contract,
+    render_drift_report,
+    render_how_scored,
+    tip,
+)
+from datalens.report.sections import icon as section_icon
+from datalens.glossary import tip as tip_text
+from datalens.report.ai_review import render_ai_review
+from datalens.profiling.coverage import coverage_pct as true_coverage, null_empty_pct
 from datalens.profiling.insights import build_insights
 from datalens.report._logo import LOGO_ICON_DARK_SVG, LOGO_ICON_LIGHT_SVG
 
@@ -57,6 +69,10 @@ def generate_html_report(
     history: list[dict[str, Any]] | None = None,
     ai_insights: dict[str, Any] | None = None,
     decision: dict[str, Any] | None = None,
+    drift_report: dict[str, Any] | None = None,
+    contract: dict[str, Any] | None = None,
+    current_metrics: dict[str, float] | None = None,
+    current_run_date: str | None = None,
     include_pii: bool = True,
     include_quality: bool = True,
     include_relationships: bool = True,
@@ -78,7 +94,10 @@ def generate_html_report(
         statistics_data, joins_data, insights_data: Pre-computed analytics from
             ``core.analyze``. Each is computed here only if left ``None`` (shim).
         diff: Optional ``history.diff.SchemaDiff`` for the Trends & Drift view.
-        history: Optional list of prior run metadata for trend sparklines.
+        history: Optional earlier runs (``HistoryStore.load_runs()``) for the drift timeline.
+        drift_report: Optional ``datalens.drift`` report (findings + rules) for Trends & Drift.
+        contract: Optional BYOS expected-schema report (Expected Schema tab).
+        current_metrics: This run's flat metrics (the timeline's last point).
         ai_insights: Optional AI-enriched narrative (rendered only when present).
         decision: Optional v2 decision layer (verdict, compliance, fitness, actions).
         include_pii: Include PII detection analysis.
@@ -123,7 +142,13 @@ def generate_html_report(
         quality_data, pii_summary, decision
     )
     quality_html = _render_quality_tab(quality_data) if quality_data else ""
-    trends_html = _render_trends_drift(diff, decision, schema_json, previous_schema)
+    trends_html = (
+        render_drift_report(drift_report, history, current_metrics, current_run_date)
+        + _render_trends_drift(diff, decision, schema_json, previous_schema, drift_report)
+    )
+    action_plan_html = render_action_plan(decision, config.version_tag)
+    how_scored_html = render_how_scored(decision, _quality_dict(quality_data))
+    contract_html = render_contract(contract)
     pii_html = _render_pii_tab(pii_data, pii_summary) if pii_data else ""
     field_explorer_html = _render_field_explorer(objects, pii_data, config.max_distinct_values)
     coverage_html = _render_coverage_heatmap(objects)
@@ -144,15 +169,20 @@ def generate_html_report(
         include_relationships,
         include_statistics,
         include_ai_insights=bool(ai_insights and ai_insights.get("enabled")),
+        include_contract=bool(contract),
     )
 
     # Assemble the full report
     html_content = _HTML_TEMPLATE.format(
-        title="Datalens Schema Analysis Report",
+        title="Datalens — Data Health Report",
+        tagline=html.escape(TAGLINE),
         logo_icon_light=_svg_data_uri(LOGO_ICON_LIGHT_SVG),
         logo_icon_dark=_svg_data_uri(LOGO_ICON_DARK_SVG),
         version_tag=config.version_tag,
         overview=overview_html,
+        action_plan=action_plan_html,
+        how_scored=how_scored_html,
+        contract=contract_html,
         trends=trends_html,
         quality=quality_html,
         pii=pii_html,
@@ -181,7 +211,22 @@ def generate_html_report(
         max_distinct_configured=config.max_distinct_values,
     )
 
+    # Chat placeholder: explains how to turn chat on (`datalens serve` replaces it with the real panel)
+    idx = html_content.rfind("</body>")
+    if idx >= 0:
+        html_content = html_content[:idx] + CHAT_OFFLINE_HTML + html_content[idx:]
+
     return html_content
+
+
+TAGLINE = "Learns normal. Flags what matters."
+"""Short product line shown above the search bar."""
+
+
+def _quality_dict(quality_data: Any) -> dict[str, Any] | None:
+    if quality_data is None:
+        return None
+    return quality_data.to_dict() if hasattr(quality_data, "to_dict") else quality_data
 
 
 def _build_field_distributions(objects: list[dict[str, Any]]) -> dict[str, Any]:
@@ -222,6 +267,7 @@ def _build_tabs(
     include_statistics: bool,
     *,
     include_ai_insights: bool = False,
+    include_contract: bool = False,
 ) -> dict[str, str]:
     """Build chapter-grouped tabs HTML based on enabled features.
     
@@ -232,39 +278,49 @@ def _build_tabs(
     # Format: (tab_id, label, icon, persona_hide)
     # persona_hide: space-separated personas to hide from (e.g., "business" or "business technical")
     
+    # Each tab sits under the question it answers. "business" in the last field
+    # hides the tab in the Business view (which keeps only decision-level tabs).
     chapters: dict[str, list[tuple[str, str, str, str]]] = {
+        # What's the state of the data, and what should I do?
         "verdict": [
             ("overview", "Overview", "📊", ""),
+            ("action-plan", "Action Plan", "🧭", ""),
         ],
+        # Can I trust it — quality, change, contract, privacy
+        "health": [],
+        # What's in it
         "shape": [
             ("insights", "Insights", "💡", ""),
+            ("coverage", "Coverage", "📈", "business"),
         ],
-        "health": [],
+        # How objects and fields connect
         "structure": [
             ("field-explorer", "Field Explorer", "🔍", "business"),
         ],
+        # Value-level detail
         "fingerprint": [
-            ("distributions", "Distributions", "📉", ""),
-            ("patterns", "Patterns", "🧩", ""),
-            ("trends", "Trends & Drift", "🕒", ""),
+            ("distributions", "Distributions", "📉", "business"),
+            ("patterns", "Patterns", "🧩", "business"),
         ],
     }
-    
-    if include_ai_insights:
-        chapters["shape"].append(("ai-insights", "AI Insights", "✨", ""))
-    chapters["shape"].append(("coverage", "Coverage", "📈", ""))
 
-    # Add conditional tabs
+    if include_ai_insights:
+        chapters["verdict"].append(("ai-insights", "AI Review", "✨", ""))
+    chapters["verdict"].append(("how-scored", "How scores work", "🧮", ""))
+
     if include_quality:
         chapters["health"].append(("quality", "Data Quality", "✅", ""))
+    chapters["health"].append(("trends", "Trends & Drift", "🕒", ""))
+    if include_contract:
+        chapters["health"].append(("contract", "Expected Schema", "📐", ""))
     if include_pii:
         chapters["health"].append(("pii", "PII Detection", "🔒", ""))
     chapters["health"].append(("type-warnings", "Type Warnings", "⚠️", "business"))
-    
+
     if include_relationships:
-        chapters["structure"].append(("relationships", "Relationships", "🔗", ""))
-    chapters["structure"].append(("join-keys", "Cross-Object", "🔀", ""))
-    
+        chapters["structure"].append(("relationships", "Relationships", "🔗", "business"))
+    chapters["structure"].append(("join-keys", "Cross-Object", "🔀", "business"))
+
     # Build HTML for each chapter
     result: dict[str, str] = {}
     first_overall = True
@@ -315,7 +371,7 @@ def _render_overview(
                 </div>
             </div>
             <div class="cover-info">
-                <h2 class="cover-title">Schema Analysis Report</h2>
+                <h2 class="cover-title">Data Health Report</h2>
                 <p class="cover-subtitle">
                     <span class="biz-lang">Analysis of your data structure, quality, and relationships</span>
                     <span class="tech-lang">Profiling {total_objects} collections with {total_fields} fields across {total_sampled:,} sampled records</span>
@@ -361,7 +417,7 @@ def _render_overview(
             <div class="metric-card dqi-card {color_class}">
                 <div class="metric-header">
                     <span class="metric-icon">✅</span>
-                    <span class="metric-title">Data Quality Index</span>
+                    <span class="metric-title">Data Quality Index{tip("dqi")}</span>
                 </div>
                 <div class="dqi-display">
                     <span class="dqi-score">{dqi:.1f}</span>
@@ -480,7 +536,7 @@ def _render_overview(
                             <th class="text-center">Sampled</th>
                             <th class="text-center">High Coverage</th>
                             <th class="text-center">Low Coverage</th>
-                            <th>Fitness for Use</th>
+                            <th>Fitness for Use{tip("fitness")}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -563,7 +619,7 @@ def _render_executive_summary(decision: dict[str, Any] | None) -> str:
         )
         actions_block = f"""
             <div class="exec-actions">
-                <h4>Top {len(top_actions)} things to fix</h4>
+                <h4>Top {len(top_actions)} things to fix{tip("", "The three highest-priority actions. The full list — with evidence, fixes and export — is in the Action Plan tab.")}</h4>
                 <ol class="exec-action-list">{action_items}</ol>
             </div>
         """
@@ -610,13 +666,13 @@ def _render_executive_summary(decision: dict[str, Any] | None) -> str:
                     <span class="emoji">{emoji}</span>
                     <div>
                         <div class="v-label">{label}</div>
-                        <div class="v-score">Data health score {score:.0f}/100</div>
+                        <div class="v-score">Data health score {score:.0f}/100{tip("health")}</div>
                     </div>
                 </div>
                 <div class="exec-pills">
                     <span class="exec-pill" style="border-color:{risk_color};color:{risk_color}">
-                        PII risk: {risk_label} ({pii_ratio:.0%} of fields)</span>
-                    <span class="exec-pill">Change since last run: {html.escape(drift_label)}</span>
+                        PII risk: {risk_label} ({pii_ratio:.0%} of fields){tip("exposure", (cs.get("risk_reason") or "") + " " + tip_text("exposure"))}</span>
+                    <span class="exec-pill">Change since last run: {html.escape(drift_label)}{tip("rolling", "Drift vs the reference run (previous, a fixed baseline, or the learned rolling band). Breaches → breaking; warnings → notable. See Trends & Drift for every finding and the rule that fired.")}</span>
                 </div>
             </div>
             <div class="exec-body">
@@ -698,6 +754,48 @@ def _before_after_dist(
     )
 
 
+_DRIFT_ICONS = [
+    ("Threshold Breaches", "alert", "var(--color-danger)"), ("Schema Drift", "layers", "var(--accent-secondary)"),
+    ("Change Summary", "layers", "var(--accent-secondary)"),
+    ("New Objects", "plus-square", "var(--color-success)"), ("Removed Objects", "trash", "var(--color-danger)"),
+    ("New Fields", "plus-circle", "var(--color-success)"), ("Removed Fields", "minus-circle", "var(--color-danger)"),
+    ("Type Changes", "shuffle", "var(--color-caution)"), ("Coverage Shifts", "trending-down", "var(--color-warning)"),
+    ("Cardinality Changes", "hash", "var(--color-info)"),
+]
+
+
+_DRIFT_SECTIONS = [  # title fragment → (export key, export label)
+    ("Change Summary", "summary", "Change summary"), ("Threshold Breaches", "breaches", "Threshold breaches"),
+    ("New Objects", "new_objects", "New objects"), ("Removed Objects", "removed_objects", "Removed objects"),
+    ("New Fields", "new_fields", "New fields"), ("Removed Fields", "removed_fields", "Removed fields"),
+    ("Type Changes", "type_changes", "Type changes"), ("Coverage Shifts", "coverage_changes", "Coverage changes"),
+    ("Cardinality Changes", "cardinality", "Cardinality changes"),
+]
+
+
+def _collapsible_card(card_html: str) -> str:
+    """
+    Turn a Trends & Drift card (<div class="card"> + card-header <h3>) into an open
+    <details> section with an icon, so each section can be folded away.
+    """
+    text = card_html.strip()
+    head = '<div class="card-header"><h3>'
+    if not text.startswith('<div class="card">') or head not in text or not text.endswith("</div>"):
+        return card_html
+    title_start = text.index(head) + len(head)
+    title_end = text.index("</h3></div>", title_start)
+    title = text[title_start:title_end]
+    for emoji in ("⚠️ ",):
+        title = title.replace(emoji, "", 1) if title.startswith(emoji) else title
+    name, color = next(((n, c) for key, n, c in _DRIFT_ICONS if key in title), ("list", "var(--text-secondary)"))
+    body = text[title_end + len("</h3></div>"):-len("</div>")]
+    key, label = next(((k, lbl) for frag, k, lbl in _DRIFT_SECTIONS if frag in title), ("other", "Other"))
+    return (f'<details class="card drift-card" open data-section="{key}" data-section-label="{label}">'
+            f'<summary class="card-header drift-summary">'
+            f'<h3><span class="drift-caret">▸</span>{section_icon(name, color)}'
+            f'{title}</h3></summary>{body}</details>')
+
+
 def _drift_field_table(
     title: str,
     paths: list[tuple[str, str]],
@@ -723,7 +821,7 @@ def _drift_field_table(
         nulls = field.get("null_empty_count", 0)
         eff = max(0, presence - nulls)
         coverage_pct = (eff / sampled * 100) if sampled else 0.0
-        cov_class = "coverage-high" if coverage_pct >= 90 else "coverage-medium" if coverage_pct >= 50 else "coverage-low"
+        cov_class = _coverage_band(coverage_pct)
         types = field.get("types", {})
         type_badges = " ".join(
             f'<span class="type-badge type-{t}">{t}</span>'
@@ -766,11 +864,342 @@ def _drift_field_table(
     """
 
 
+_CHANGE_AREAS = [
+    ("Schema", {"field_added", "field_removed", "field_renamed", "type_changed", "object_added", "object_removed"}),
+    ("Volume", {"row_count"}),
+    ("Coverage", {"coverage"}),
+    ("Integrity", {"orphan_pct"}),
+    ("Values", {"distribution", "categories_new", "categories_vanished", "distinct"}),
+    ("Scores", {"dqi", "health"}),
+]
+
+
+def _fmt_drift_value(kind: str, value: Any) -> str:
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value[:6]) + (" …" if len(value) > 6 else "")
+    if isinstance(value, (int, float)):
+        if kind in ("coverage", "orphan_pct", "field_added", "field_removed"):
+            return f"{value:.1f}%"
+        if kind in ("row_count", "distinct"):
+            return f"{value:,.0f}"
+        return f"{value:.2f}" if kind == "distribution" else f"{value:.1f}"
+    return str(value)
+
+
+def _short_message(f: dict[str, Any]) -> str:
+    """The finding message without its leading 'object.field:' (already shown in columns)."""
+    msg = str(f.get("message", ""))
+    obj, fld = f.get("object") or "dataset", f.get("field") or ""
+    prefixes = ([f"{obj}.{fld}: "] if fld else []) + [f"{obj}: ", "dataset: "]
+    for prefix in prefixes:
+        if msg.startswith(prefix):
+            return msg[len(prefix):]
+    return msg
+
+
+_RESULT_META = {"fail": ("Breach", "var(--color-danger)"), "warn": ("Warning", "var(--color-warning)"),
+                "info": ("Info", "var(--color-info)"), "ok": ("Within rule", "var(--color-success)")}
+_SCOPE_LABEL = {"builtin": "global default", "dataset": "global (config)", "object": "object rule",
+                "field": "field rule", "rolling": "learned band"}
+
+
+def _render_coverage_shifts(changes: list[dict[str, Any]], prev_index, cur_index) -> str:
+    """Coverage Shifts: every real coverage move, the rule that applies to it, and whether it fired."""
+    rows = []
+    for c in changes:
+        up = c["delta_pts"] > 0
+        color = "var(--color-success)" if up else "var(--color-danger)"
+        arrow = "▲" if up else "▼"
+        label, res_color = _RESULT_META.get(c["severity"], _RESULT_META["ok"])
+        pct = f"{c['delta_pct']:+.1f}%" if c.get("delta_pct") is not None else "new"
+        fired = c["severity"] in ("fail", "warn")
+        rule_html = (f'<span class="rule-chip{" rule-fired" if fired else ""}" '
+                     f'style="--rc:{res_color}">{html.escape(c["rule"])}</span>'
+                     f'<div class="chg-kind">{html.escape(_SCOPE_LABEL.get(c["scope"], c["scope"]))}</div>')
+        rows.append(f"""<tr data-object="{html.escape(c['object'])}">
+            <td><span class="object-name">{html.escape(c['object'])}</span></td>
+            <td><code>{html.escape(c['field'])}</code></td>
+            <td class="text-center">{c['old']:.1f}%</td>
+            <td class="text-center">{c['new']:.1f}%</td>
+            <td class="text-center" style="color:{color};font-weight:600">{arrow} {abs(c['delta_pts']):.1f} pts</td>
+            <td class="text-center" style="color:{color};font-weight:600">{pct}</td>
+            <td data-v="{html.escape(c['rule'])} ({html.escape(_SCOPE_LABEL.get(c['scope'], c['scope']))})">{rule_html}</td>
+            <td><span class="chg-sev" style="color:{res_color};border-color:{res_color}">{label}</span></td>
+            <td>{_before_after_dist(c['object'], c['field'], prev_index, cur_index)}</td>
+        </tr>""")
+    fired = sum(1 for c in changes if c["severity"] in ("fail", "warn"))
+    badge = "badge-danger" if any(c["severity"] == "fail" for c in changes) else "badge-warning"
+    return f"""
+            <div class="card">
+                <div class="card-header"><h3>Coverage Shifts <span class="badge {badge}">{len(changes)}</span></h3></div>
+                <div class="card-body">
+                    <p style="color:var(--text-secondary);margin-top:0">{fired} of {len(changes)} coverage change(s)
+                        crossed their rule. Change % is relative (100% → 70% is −30%); rules apply per direction and
+                        the most specific wins: field → object → global. Configure with <code>--coverage-drop</code> /
+                        <code>--coverage-increase</code>, <code>--field-coverage-rule</code>, a <code>drift:</code>
+                        config section or an expected schema.</p>
+                    <div class="table-container">
+                    <table class="data-table sortable drift-table"><thead><tr>
+                    <th>Object</th><th>Field</th><th class="text-center">Was</th><th class="text-center">Now</th>
+                    <th class="text-center">Change (pts)</th><th class="text-center">Change (%)</th>
+                    <th>Rule</th><th>Result</th><th>Value Distribution</th>
+                </tr></thead><tbody>{"".join(rows)}</tbody></table></div></div>
+            </div>
+    """
+
+
+def _render_rules_in_effect(rules: list[dict[str, Any]]) -> str:
+    """Every rule in effect for this run: the ones that fired are highlighted, the rest dimmed."""
+    if not rules:
+        return ""
+    rows = []
+    for r in rules:
+        fired = r["fired"] > 0
+        label, color = _RESULT_META.get(r["worst"], _RESULT_META["ok"])
+        status = (f'<span class="chg-sev" style="color:{color};border-color:{color}">fired ×{r["fired"]}</span>'
+                  if fired else '<span class="chg-kind">not triggered</span>')
+        examples = ", ".join(html.escape(e) for e in r.get("examples", []))
+        rows.append(f"""<tr class="{'rule-row-fired' if fired else 'rule-row-idle'}">
+            <td>{html.escape(r['metric'].replace('_', ' '))}</td>
+            <td>{html.escape(_SCOPE_LABEL.get(r['scope'], r['scope']))}<div class="chg-kind">{html.escape(r['target'])}</div></td>
+            <td><span class="rule-chip{' rule-fired' if fired else ''}" style="--rc:{color}">{html.escape(r['threshold'])}</span></td>
+            <td>{status}</td>
+            <td class="chg-kind">{examples}</td>
+        </tr>""")
+    n_fired = sum(1 for r in rules if r["fired"])
+    return f"""
+        <details class="rules-in-effect" open>
+            <summary><b>Rules in effect</b> <span class="chg-kind">{n_fired} of {len(rules)} fired — highlighted;
+                the rest were checked and not triggered</span></summary>
+            <div class="table-container"><table class="data-table rules-table"><thead><tr>
+                <th>Metric</th><th>Scope</th><th>Threshold</th><th>Status</th><th>Fired on</th>
+            </tr></thead><tbody>{"".join(rows)}</tbody></table></div>
+        </details>
+    """
+
+
+def _render_change_summary(diff: Any, decision: dict[str, Any] | None, drift_report: dict[str, Any] | None,
+                           badge_cls: str, severity: str) -> str:
+    """The 'Change summary' card: counts per area, then every finding as a filterable table row."""
+    findings = (drift_report or {}).get("findings", [])
+    if not findings:  # legacy path: schema diff only
+        drivers = (decision or {}).get("health_verdict", {}).get("drivers", [])
+        text = next((d for d in drivers if "drift" in d.lower()), "Changes were detected since the previous run.")
+        return (f'<div class="card"><div class="card-header"><h3>Change Summary <span class="badge {badge_cls}">'
+                f'{severity}</span></h3></div><div class="card-body"><p style="color:var(--text-secondary)">'
+                f'{html.escape(text)}</p></div></div>')
+    colors = {"fail": "var(--color-danger)", "warn": "var(--color-warning)", "info": "var(--color-info)"}
+    labels = {"fail": "Breach", "warn": "Warning", "info": "Info"}
+    area_of = {k: area for area, kinds in _CHANGE_AREAS for k in kinds}
+    chips = []
+    for area, kinds in _CHANGE_AREAS:
+        hits = [f for f in findings if f["kind"] in kinds]
+        if not hits:
+            continue
+        worst = "fail" if any(f["severity"] == "fail" for f in hits) else "warn" if any(
+            f["severity"] == "warn" for f in hits) else "info"
+        chips.append(f'<span class="chg-chip" style="border-color:{colors[worst]}"><b style="color:{colors[worst]}">'
+                     f'{len(hits)}</b> {area}</span>')
+    rows = []
+    for f in findings:
+        sev, kind = f["severity"], f["kind"]
+        obj = f.get("object") or "(dataset)"
+        change = f.get("delta_pct")
+        change_txt = (f"{change:+.1f}%" if isinstance(change, (int, float)) else
+                      f"{f['delta']:+.2f}" if isinstance(f.get("delta"), (int, float)) else "—")
+        change_color = ("var(--color-success)" if isinstance(f.get("delta"), (int, float)) and f["delta"] > 0
+                        else "var(--color-danger)" if isinstance(f.get("delta"), (int, float)) and f["delta"] < 0
+                        else "var(--text-secondary)")
+        rule = f.get("rule") or {}
+        rows.append(f"""<tr data-object="{html.escape(obj)}" data-severity="{sev}">
+            <td><span class="chg-sev" style="color:{colors[sev]};border-color:{colors[sev]}">{labels[sev]}</span></td>
+            <td data-v="{html.escape(area_of.get(kind, 'Other'))} ({html.escape(kind.replace('_', ' '))})">{html.escape(area_of.get(kind, 'Other'))}<div class="chg-kind">{html.escape(kind.replace('_', ' '))}</div></td>
+            <td><span class="object-name">{html.escape(obj)}</span></td>
+            <td><code>{html.escape(f.get('field') or '—')}</code></td>
+            <td class="chg-what">{html.escape(_short_message(f))}</td>
+            <td class="text-center">{html.escape(_fmt_drift_value(kind, f.get('old')))}</td>
+            <td class="text-center">{html.escape(_fmt_drift_value(kind, f.get('new')))}</td>
+            <td class="text-center" style="color:{change_color};font-weight:600">{html.escape(change_txt)}</td>
+            <td class="chg-rule" data-v="{html.escape(str(rule.get('threshold', '')))} ({html.escape(str(rule.get('scope', '')))})"><span class="rule-chip rule-fired" style="--rc:{colors[sev]}">{html.escape(str(rule.get('threshold', '')))}</span><div class="chg-kind">{html.escape(_SCOPE_LABEL.get(str(rule.get('scope', '')), str(rule.get('scope', ''))))}</div></td>
+        </tr>""")
+    summ = drift_report.get("summary", {})
+    ref = (drift_report.get("reference") or {}).get("tag") or drift_report.get("mode")
+    return f"""
+        <div class="card">
+            <div class="card-header"><h3>Change Summary <span class="badge {badge_cls}">{severity}</span></h3></div>
+            <div class="card-body">
+                <style>
+                    .chg-chips {{ display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 12px; }}
+                    .chg-chip {{ border:1px solid; border-radius:999px; padding:2px 10px; font-size:.8rem;
+                                 color:var(--text-secondary); }}
+                    .chg-sev {{ display:inline-block; min-width:62px; text-align:center; font-size:.68rem; font-weight:700;
+                                text-transform:uppercase; border:1px solid; border-radius:999px; padding:0 6px; }}
+                    .chg-table td {{ vertical-align:top; font-size:.84rem; }}
+                    .chg-kind {{ font-size:.72rem; color:var(--text-tertiary); }}
+                    .chg-what {{ min-width:260px; line-height:1.45; }}
+                    .chg-rule {{ font-size:.78rem; color:var(--text-secondary); min-width:150px; }}
+                    .rule-chip {{ display:inline-block; font-size:.74rem; padding:1px 8px; border-radius:6px;
+                                  border:1px dashed var(--border-secondary); color:var(--text-secondary); }}
+                    .rule-chip.rule-fired {{ border:1px solid var(--rc); color:var(--rc); font-weight:700;
+                                  background:color-mix(in srgb, var(--rc) 10%, transparent); }}
+                    .drift-table .rule-chip {{ white-space:nowrap; }}
+                    .rules-in-effect {{ margin-top:16px; }}
+                    .rules-in-effect > summary {{ cursor:pointer; margin-bottom:8px; }}
+                    .rule-row-idle td {{ opacity:.55; }}
+                    .rules-table td {{ font-size:.82rem; vertical-align:top; }}
+                </style>
+                <p style="color:var(--text-secondary);margin-top:0">
+                    Compared with <b>{html.escape(str(ref))}</b>: <b>{summ.get('fail', 0)}</b> breach(es),
+                    <b>{summ.get('warn', 0)}</b> warning(s), {summ.get('info', 0)} info. Filter by object and export
+                    with the toolbar above; field-level detail follows below.</p>
+                <div class="chg-chips">{"".join(chips)}</div>
+                <div class="table-container">
+                    <table class="data-table sortable chg-table"><thead><tr>
+                        <th>Severity</th><th>Area</th><th>Object</th><th>Field</th><th>What changed</th>
+                        <th class="text-center">Before</th><th class="text-center">After</th>
+                        <th class="text-center">Change</th><th>Rule</th>
+                    </tr></thead><tbody>{"".join(rows)}</tbody></table>
+                </div>
+                {_render_rules_in_effect(drift_report.get("rules_in_effect") or [])}
+            </div>
+        </div>
+    """
+
+
+def _drift_toolbar(present: list[tuple[str, str]]) -> str:
+    options = "".join(
+        f'<label class="object-filter-option"><input type="checkbox" value="{k}" checked><span>{html.escape(lbl)}</span></label>'
+        for k, lbl in present)
+    return f"""
+        <div class="table-controls drift-toolbar">
+            <div class="object-filter-dropdown" id="trendsObjectFilterDropdown">
+                <button type="button" class="object-filter-toggle" id="trendsObjectFilterToggle" aria-expanded="false">
+                    Objects: All
+                </button>
+                <div class="object-filter-menu" id="trendsObjectFilterMenu">
+                    <label class="object-filter-option object-filter-select-all">
+                        <input type="checkbox" id="trendsObjectSelectAll" checked>
+                        <span>Select All</span>
+                    </label>
+                    <div class="object-filter-divider"></div>
+                    <div id="trendsObjectFilterOptions"></div>
+                </div>
+            </div>
+            <span style="flex:1"></span>
+            <div style="display:flex;gap:var(--space-sm);flex-wrap:wrap;align-items:flex-start">
+                <div class="object-filter-dropdown" id="trendsExportDropdown">
+                    <button type="button" class="btn btn-secondary" id="trendsExportToggle" aria-expanded="false"
+                        aria-controls="trendsExportMenu">📥 Export CSV ▾</button>
+                    <div class="object-filter-menu export-menu" id="trendsExportMenu">
+                        <div class="export-menu-head">What to export</div>
+                        <div class="export-menu-actions">
+                            <button type="button" class="dl-btn" data-export-check="all">Check all</button>
+                            <button type="button" class="dl-btn" data-export-check="none">Uncheck all</button>
+                        </div>
+                        <div class="object-filter-divider"></div>
+                        <div id="trendsExportOptions">{options}</div>
+                        <div class="object-filter-divider"></div>
+                        <button type="button" class="btn btn-primary export-download" id="trendsExportDownload">
+                            Download CSV</button>
+                        <div class="export-note">Respects the object filter.</div>
+                    </div>
+                </div>
+                <button class="btn btn-secondary" type="button"
+                    onclick="document.querySelectorAll('#trends details.drift-card, #trends details.dl-fold').forEach(d => d.open = true)">
+                    ⊞ Expand all</button>
+                <button class="btn btn-secondary" type="button"
+                    onclick="document.querySelectorAll('#trends details.drift-card, #trends details.dl-fold').forEach(d => d.open = false)">
+                    ⊟ Collapse all</button>
+            </div>
+        </div>
+        <style>
+            .drift-toolbar {{ position:relative; z-index:5; }}
+            .export-menu {{ right:0; left:auto; min-width:250px; max-height:none; overflow:visible; }}
+            #trendsExportDropdown {{ position:relative; }}
+            .export-menu-head {{ font-weight:700; font-size:.8rem; padding:4px 8px; color:var(--text-primary); }}
+            .export-menu-actions {{ display:flex; gap:6px; padding:4px 8px; }}
+            .export-download {{ width:calc(100% - 16px); margin:6px 8px 2px; }}
+            .export-note {{ font-size:.72rem; color:var(--text-tertiary); padding:2px 8px 6px; }}
+        </style>
+    """
+
+
+_DRIFT_TOOLBAR_JS = """
+<script>
+(function(){
+  var dd = document.getElementById('trendsExportDropdown'); if (!dd) return;
+  var toggle = document.getElementById('trendsExportToggle'), menu = document.getElementById('trendsExportMenu');
+  toggle.addEventListener('click', function(e){ e.stopPropagation(); menu.classList.toggle('open');
+    toggle.setAttribute('aria-expanded', menu.classList.contains('open')); });
+  document.addEventListener('click', function(e){ if (!dd.contains(e.target)) menu.classList.remove('open'); });
+  dd.querySelectorAll('[data-export-check]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var on = b.dataset.exportCheck === 'all';
+      dd.querySelectorAll('#trendsExportOptions input').forEach(function(cb){ cb.checked = on; });
+    });
+  });
+  function visible(el){ return el.style.display !== 'none'; }
+  function text(el){
+    if (!el) return '';
+    if (el.dataset && el.dataset.v !== undefined) return el.dataset.v;
+    var parts = [];
+    el.childNodes.forEach(function(n){ var t = (n.textContent || '').replace(/\\s+/g, ' ').trim(); if (t) parts.push(t); });
+    return parts.join(' · ');
+  }
+  document.getElementById('trendsExportDownload').addEventListener('click', function(){
+    var chosen = {}; dd.querySelectorAll('#trendsExportOptions input:checked').forEach(function(cb){ chosen[cb.value] = true; });
+    if (!Object.keys(chosen).length) { alert('Choose at least one section to export.'); return; }
+    var out = [['Section','Severity','Area','Object','Field','What changed','Before','After','Change','Rule']];
+    document.querySelectorAll('#trends [data-section]').forEach(function(sec){
+      if (!chosen[sec.dataset.section]) return;
+      var label = sec.dataset.sectionLabel;
+      if (sec.dataset.section === 'summary') {
+        sec.querySelectorAll('table.chg-table tbody tr').forEach(function(tr){
+          if (!visible(tr)) return;
+          var c = Array.from(tr.children).map(text);
+          out.push([label, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]]);
+        });
+        return;
+      }
+      var table = sec.querySelector('table.drift-table');
+      if (table) {
+        var heads = Array.from(table.querySelectorAll('thead th')).map(text);
+        table.querySelectorAll('tbody tr').forEach(function(tr){
+          if (!visible(tr)) return;
+          var c = Array.from(tr.children).map(text);
+          var details = c.slice(2).map(function(v, i){ return v ? (heads[i + 2] || 'col') + ': ' + v : ''; })
+                         .filter(Boolean).join('; ');
+          out.push([label, '', '', c[0], c[1], details, '', '', '', '']);
+        });
+        return;
+      }
+      sec.querySelectorAll('.drift-list li').forEach(function(li){
+        if (!visible(li)) return;
+        out.push([label, '', '', li.dataset.object || '', '', text(li), '', '', '', '']);
+      });
+    });
+    if (out.length === 1) { alert('Nothing to export for this selection and object filter.'); return; }
+    var csv = out.map(function(r){ return r.map(function(v){ v = String(v == null ? '' : v).replace(/"/g, '""');
+      return /[",\\n]/.test(v) ? '"' + v + '"' : v; }).join(','); }).join('\\n');
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv;charset=utf-8;'}));
+    a.download = 'datalens-drift-changes.csv'; document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 0);
+    menu.classList.remove('open');
+  });
+})();
+</script>
+"""
+
+
 def _render_trends_drift(
     diff: Any | None,
     decision: dict[str, Any] | None,
     schema_json: dict[str, Any] | None = None,
     previous_schema: dict[str, Any] | None = None,
+    drift_report: dict[str, Any] | None = None,
 ) -> str:
     """
     Render the Trends & Drift tab from a ``history.diff.SchemaDiff``.
@@ -816,7 +1245,8 @@ def _render_trends_drift(
     def _list_card(title: str, items: list[str], cls: str = "badge-info") -> str:
         if not items:
             return ""
-        rows = "".join(f'<li><span class="badge {cls}">{html.escape(str(i))}</span></li>'
+        rows = "".join(f'<li data-object="{html.escape(str(i).split(".")[0].split(":")[0])}">'
+                       f'<span class="badge {cls}">{html.escape(str(i))}</span></li>'
                        for i in items)
         return f"""
             <div class="card">
@@ -827,42 +1257,12 @@ def _render_trends_drift(
 
     sections: list[str] = []
 
-    # Severity rollup header
-    drivers = (decision or {}).get("health_verdict", {}).get("drivers", [])
-    drift_driver = next((d for d in drivers if "drift" in d.lower()), "")
-    sections.append(f"""
-        <div class="card">
-            <div class="card-header"><h3>Schema Drift
-                <span class="badge {badge_cls}">{severity}</span></h3></div>
-            <div class="card-body">
-                <p style="color:var(--text-secondary)">
-                    {html.escape(drift_driver) or "Changes were detected since the previous run."}
-                </p>
-            </div>
-        </div>
-    """)
+    # Toolbar (object filter + export picker) goes first so it governs everything
+    # below; it is filled in at the end, once we know which sections exist.
+    sections.append("__DRIFT_TOOLBAR__")
 
-    # Controls: object filter (shared across all drift tables) + CSV export for producers.
-    sections.append("""
-        <div class="table-controls">
-            <div class="object-filter-dropdown" id="trendsObjectFilterDropdown">
-                <button type="button" class="object-filter-toggle" id="trendsObjectFilterToggle" aria-expanded="false">
-                    Objects: All
-                </button>
-                <div class="object-filter-menu" id="trendsObjectFilterMenu">
-                    <label class="object-filter-option object-filter-select-all">
-                        <input type="checkbox" id="trendsObjectSelectAll" checked>
-                        <span>Select All</span>
-                    </label>
-                    <div class="object-filter-divider"></div>
-                    <div id="trendsObjectFilterOptions"></div>
-                </div>
-            </div>
-            <button class="btn btn-secondary" onclick="exportDriftChanges()">
-                📥 Export Drift CSV
-            </button>
-        </div>
-    """)
+    # What changed, at a glance: every finding as a table row.
+    sections.append(_render_change_summary(diff, decision, drift_report, badge_cls, severity))
 
     # Coverage threshold breaches — a field/object/dataset-configured %-point
     # variance was crossed (see history.diff.resolve_coverage_threshold). Shown
@@ -937,7 +1337,10 @@ def _render_trends_drift(
         """)
 
     # Coverage changes (field exists in both runs → show before/after distributions)
-    cov_changes = getattr(diff, "coverage_changes", [])
+    engine_cov = (drift_report or {}).get("coverage_changes")
+    if engine_cov:
+        sections.append(_render_coverage_shifts(engine_cov, prev_index, cur_index))
+    cov_changes = [] if engine_cov is not None and drift_report else getattr(diff, "coverage_changes", [])
     if cov_changes:
         rows = ""
         for c in cov_changes:
@@ -1000,9 +1403,24 @@ def _render_trends_drift(
             .ba-col { flex:1; min-width:0; }
             .ba-label { font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;
                         color:var(--text-tertiary); margin-bottom:2px; }
+            details.drift-card > summary.drift-summary { cursor:pointer; list-style:none; }
+            details.drift-card > summary.drift-summary::-webkit-details-marker { display:none; }
+            .drift-summary h3 { display:flex; align-items:center; gap:10px; }
+            .drift-caret { display:inline-block; width:10px; color:var(--text-tertiary);
+                           transition:transform 150ms; font-size:.8em; }
+            details.drift-card[open] .drift-caret { transform:rotate(90deg); }
+            details.drift-card > summary.drift-summary { padding:12px 18px; }
+            .drift-summary h3 { margin:0; font-size:1rem; }
+            details.drift-card:not([open]) > summary.drift-summary { border-bottom:0; }
+            .dl-icon { display:inline-flex; align-items:center; justify-content:center; flex:0 0 30px;
+                       width:30px; height:30px; border-radius:8px;
+                       background:color-mix(in srgb, currentColor 14%, transparent); }
         </style>
     """
-    return drift_css + "\n".join(s for s in sections if s)
+    cards = [_collapsible_card(sec) for sec in sections if sec]
+    present = [(k, lbl) for _, k, lbl in _DRIFT_SECTIONS if any(f'data-section="{k}"' in c for c in cards)]
+    body = "\n".join(cards).replace("__DRIFT_TOOLBAR__", _drift_toolbar(present))
+    return drift_css + body + _DRIFT_TOOLBAR_JS
 
 
 def _render_quality_tab(quality_data: Any) -> str:
@@ -1029,9 +1447,17 @@ def _render_quality_tab(quality_data: Any) -> str:
         dim_bars = []
         for dim_name, dim in core:
             color = _get_score_color(dim.score)
+            if dim.weight == 0:  # not scored for this object (e.g. too few rows)
+                note = (dim.details or {}).get("not_scored", "not scored")
+                dim_bars.append(f"""
+                <div class="dimension-row">
+                    <span class="dimension-name">{dim_name}{tip(dim.name)}</span>
+                    <span class="dimension-score" style="color:var(--text-tertiary)">n/a{tip("", note)}</span>
+                </div>""")
+                continue
             dim_bars.append(f"""
                 <div class="dimension-row">
-                    <span class="dimension-name">{dim_name}</span>
+                    <span class="dimension-name">{dim_name}{tip(dim.name)}</span>
                     <div class="dimension-bar-container">
                         <div class="dimension-bar" style="width: {dim.score}%; background: {color}"></div>
                     </div>
@@ -1059,12 +1485,7 @@ def _render_quality_tab(quality_data: Any) -> str:
 
     return f"""
         <div class="quality-overview">
-            <div class="overall-dqi">
-                <div class="overall-dqi-circle {get_quality_color(quality_data.overall_dqi)}">
-                    <span class="overall-score">{quality_data.overall_dqi:.1f}</span>
-                    <span class="overall-label">Overall DQI</span>
-                </div>
-            </div>
+            {_render_dqi_dial(quality_data.overall_dqi)}
             {radar_html}
         </div>
         <div class="quality-grid">
@@ -1141,6 +1562,43 @@ def _get_score_color(score: float) -> str:
     return "var(--color-danger)"
 
 
+# ─── Overall DQI dial ───────────────────────────────────────────────────────
+
+def _render_dqi_dial(score: float) -> str:
+    """Overall DQI as a progress ring: the arc is the score out of 100, the value sits inside."""
+    import math
+
+    value = max(0.0, min(100.0, float(score or 0)))
+    size, stroke = 124, 10
+    r = (size - stroke) / 2 - 4
+    circumference = 2 * math.pi * r
+    filled = circumference * value / 100
+    color = _get_score_color(value)
+    grade = get_quality_grade(value)
+    label = f"Overall Data Quality Index {value:.1f} out of 100, grade {grade}"
+    return f"""
+        <div class="dqi-panel">
+            <h4 class="dqi-title">Data Quality Index{tip("dqi")}</h4>
+            <div class="dqi-dial" title="{label}">
+                <svg viewBox="0 0 {size} {size}" width="{size}" height="{size}" role="img" aria-label="{label}">
+                    <circle cx="{size / 2}" cy="{size / 2}" r="{r:.1f}" fill="none"
+                            stroke="var(--bg-tertiary)" stroke-width="{stroke}" />
+                    <circle cx="{size / 2}" cy="{size / 2}" r="{r:.1f}" fill="none" stroke="{color}"
+                            stroke-width="{stroke}" stroke-linecap="round"
+                            stroke-dasharray="{filled:.2f} {circumference:.2f}"
+                            transform="rotate(-90 {size / 2} {size / 2})" />
+                </svg>
+                <div class="dqi-center">
+                    <span class="dqi-value">{value:.1f}</span>
+                    <span class="dqi-kpi">DQI{tip("dqi")}</span>
+                    <span class="dqi-grade" style="border-color:{color};color:{color}">Grade {grade}</span>
+                </div>
+            </div>
+            <div class="dqi-caption">Overall score, out of 100</div>
+        </div>
+    """
+
+
 # ─── Schema Dimensions radar ────────────────────────────────────────────────
 
 def _render_schema_dimensions_radar(dimensions: dict[str, float]) -> str:
@@ -1161,8 +1619,8 @@ def _render_schema_dimensions_radar(dimensions: dict[str, float]) -> str:
         return f'<div class="schema-dimensions"><h4>Schema Dimensions</h4>{bars}</div>'
 
     import math
-    cx, cy, r = 230, 170, 115
-    width, height = 460, 340
+    cx, cy, r = 190, 108, 66
+    width, height = 380, 216
     angles = [(-math.pi / 2) + (2 * math.pi * i / n) for i in range(n)]
 
     # Ring guides
@@ -1181,14 +1639,14 @@ def _render_schema_dimensions_radar(dimensions: dict[str, float]) -> str:
             f'<line x1="{cx}" y1="{cy}" x2="{x2:.1f}" y2="{y2:.1f}" '
             f'stroke="var(--border-primary)" opacity="0.6" />'
         )
-        lx = cx + (r + 22) * math.cos(angle)
-        ly = cy + (r + 22) * math.sin(angle)
+        lx = cx + (r + 16) * math.cos(angle)
+        ly = cy + (r + 16) * math.sin(angle)
         anchor = "middle" if abs(math.cos(angle)) < 0.3 else ("start" if math.cos(angle) > 0 else "end")
         labels.append(
             f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}" '
-            f'dominant-baseline="middle" fill="var(--text-secondary)" font-size="11">'
+            f'dominant-baseline="middle" fill="var(--text-secondary)" font-size="12">'
             f'<tspan font-weight="600">{html.escape(name.capitalize())}</tspan>'
-            f'<tspan dx="4" fill="var(--accent-primary)" font-weight="700">{score:.0f}</tspan>'
+            f'<tspan dx="5" fill="var(--text-primary)" font-weight="700">{score:.0f}</tspan>'
             f'</text>'
         )
 
@@ -1198,16 +1656,25 @@ def _render_schema_dimensions_radar(dimensions: dict[str, float]) -> str:
         rr = r * max(0.0, min(100.0, score)) / 100
         pts.append(f"{cx + rr * math.cos(angle):.1f},{cy + rr * math.sin(angle):.1f}")
     poly = " ".join(pts)
+    # Hover targets: a dot per dimension with a tooltip (bigger invisible hit area).
+    dots = "".join(
+        f'<g><title>{html.escape(name.capitalize())}: {score:.1f} / 100</title>'
+        f'<circle cx="{pt.split(",")[0]}" cy="{pt.split(",")[1]}" r="10" fill="transparent" />'
+        f'<circle cx="{pt.split(",")[0]}" cy="{pt.split(",")[1]}" r="3.5" fill="var(--accent-primary)" '
+        f'stroke="var(--bg-secondary)" stroke-width="2" /></g>'
+        for (name, score), pt in zip(items, pts)
+    )
 
     return f"""
         <div class="schema-dimensions">
-            <h4>Schema Dimensions</h4>
+            <h4>Schema Dimensions{tip("dqi", "Each dimension's score (0–100) across all objects. Hover a point for its value; see How scores work for formulas and weights.")}</h4>
             <svg viewBox="0 0 {width} {height}" width="100%" style="max-width:{width}px;height:auto;"
                  role="img" aria-label="Schema dimensions radar">
                 {rings}
                 {"".join(axes)}
-                <polygon points="{poly}" fill="var(--accent-primary)" fill-opacity="0.25"
-                         stroke="var(--accent-primary)" stroke-width="2" />
+                <polygon points="{poly}" fill="var(--accent-primary)" fill-opacity="0.18"
+                         stroke="var(--accent-primary)" stroke-width="2" stroke-linejoin="round" />
+                {dots}
                 {"".join(labels)}
             </svg>
         </div>
@@ -1290,99 +1757,8 @@ def _render_insights_tab(insights_data: dict[str, Any], joins_data: dict[str, An
 
 
 def _render_ai_insights_tab(ai_insights: dict[str, Any]) -> str:
-    """Render the AI Insights tab — model-generated findings and recommendations."""
-    if not ai_insights or not ai_insights.get("enabled"):
-        return (
-            '<div class="ai-insights-empty">'
-            "<p>AI insights were not generated for this run.</p>"
-            f"<p class=\"ai-insights-hint\">{html.escape(str(ai_insights.get('error', '')))}</p>"
-            "</div>"
-        )
-
-    provider = html.escape(str(ai_insights.get("provider", "AI")))
-    model = html.escape(str(ai_insights.get("model") or "default"))
-    auth_mode = html.escape(str(ai_insights.get("auth_mode", "")))
-
-    section_defs = [
-        ("data_story", "Data Story", "📖", "narrative"),
-        ("unique_id_patterns", "Unique ID Patterns", "🔑", "patterns"),
-        ("key_domain_fields", "Key & Domain Fields", "🏷️", "domain"),
-        ("structural_value_patterns", "Structural & Value Patterns", "📐", "structure"),
-        ("cross_object_patterns", "Cross-Object Patterns", "🔗", "cross"),
-        ("domain_field_assessments", "Domain Assessments", "🎯", "assess"),
-        ("hidden_value_relationships", "Hidden Relationships", "💎", "hidden"),
-        ("quality_assessment", "Quality Assessment", "✅", "quality"),
-    ]
-
-    sections = ai_insights.get("sections") or {}
-    cards: list[str] = []
-    for key, title, icon, css_class in section_defs:
-        body = sections.get(key) or ai_insights.get(key)
-        if not body:
-            continue
-        if isinstance(body, list):
-            inner = "".join(
-                f"<li>{html.escape(str(item) if not isinstance(item, dict) else '; '.join(f'{k}: {v}' for k, v in item.items()))}</li>"
-                for item in body
-            )
-            content = f"<ul class=\"ai-insight-list\">{inner}</ul>"
-        elif isinstance(body, dict):
-            content = "".join(
-                f"<p><strong>{html.escape(str(k))}:</strong> {html.escape(str(v))}</p>"
-                for k, v in body.items()
-            )
-        else:
-            paragraphs = [html.escape(p.strip()) for p in str(body).split("\n") if p.strip()]
-            content = "".join(f"<p>{p}</p>" for p in paragraphs) or f"<p>{html.escape(str(body))}</p>"
-
-        cards.append(
-            f'<article class="ai-insight-card ai-insight-{css_class}">'
-            f'<header><span class="ai-insight-icon">{icon}</span>'
-            f"<h4>{html.escape(title)}</h4></header>"
-            f'<div class="ai-insight-body">{content}</div></article>'
-        )
-
-    recs = ai_insights.get("recommendations") or []
-    rec_cards = ""
-    if recs:
-        rec_items = []
-        for r in recs:
-            if isinstance(r, dict):
-                sev = html.escape(r.get("severity", "low"))
-                cat = html.escape(r.get("category", "general"))
-                action = html.escape(r.get("action", ""))
-                rec_items.append(
-                    f'<div class="ai-rec-card sev-{sev}">'
-                    f'<span class="ai-rec-severity">{sev.upper()}</span>'
-                    f'<span class="ai-rec-category">{cat}</span>'
-                    f'<p class="ai-rec-action">{action}</p></div>'
-                )
-            else:
-                rec_items.append(f'<div class="ai-rec-card"><p>{html.escape(str(r))}</p></div>')
-        rec_cards = (
-            '<section class="ai-recommendations">'
-            "<h3>🛠 AI Recommendations</h3>"
-            f'<div class="ai-rec-grid">{"".join(rec_items)}</div></section>'
-        )
-
-    return f"""
-        <div class="ai-insights-section">
-            <div class="ai-insights-banner">
-                <div class="ai-insights-badge">✨ AI-Generated</div>
-                <p class="ai-insights-meta">
-                    Provider: <strong>{provider}</strong> ·
-                    Auth: <strong>{auth_mode}</strong> ·
-                    Model: <code>{model}</code>
-                </p>
-                <p class="ai-insights-disclaimer">
-                    Findings are model-generated from schema profiling signals.
-                    Validate before production or compliance decisions.
-                </p>
-            </div>
-            <div class="ai-insight-grid">{"".join(cards) or "<p>No section content returned.</p>"}</div>
-            {rec_cards}
-        </div>
-    """
+    """Render the AI Review tab (see report.ai_review)."""
+    return render_ai_review(ai_insights)
 
 
 def _render_locale_dimensions(locale_dims: dict[str, Any]) -> str:
@@ -2074,10 +2450,11 @@ def _render_field_explorer(objects: list[dict[str, Any]], pii_data: dict | None,
         for field in obj.get("fields", []):
             path = field.get("path", "")
             path_escaped = html.escape(path)
+            # True coverage (missing, null and empty all count against it); the
+            # Null/Empty column is the share of rows where the key exists but is empty.
             presence = field.get("presence_count", 0)
-            null_empty = field.get("null_empty_count", 0)
-            coverage_pct = (presence / sampled * 100) if sampled > 0 else 0
-            null_pct = (null_empty / presence * 100) if presence > 0 else 0
+            coverage_pct = true_coverage(field, sampled)
+            null_pct = null_empty_pct(field, sampled)
 
             types = field.get("types", {})
             type_badges = " ".join(
@@ -2112,13 +2489,8 @@ def _render_field_explorer(objects: list[dict[str, Any]], pii_data: dict | None,
                 pii_type = pii_lookup[pii_key]
                 pii_badge = f'<span class="pii-badge">🔒 {pii_type}</span>'
 
-            # Coverage styling
-            if coverage_pct >= 90:
-                cov_class = "coverage-high"
-            elif coverage_pct >= 50:
-                cov_class = "coverage-medium"
-            else:
-                cov_class = "coverage-low"
+            # Coverage styling: the same 5-band scale as the Coverage heatmap
+            cov_class = _coverage_band(coverage_pct)
 
             # Null/Empty styling (highlight cells with any null/empty values)
             if null_pct == 0:
@@ -2231,10 +2603,9 @@ def _render_coverage_heatmap(objects: list[dict[str, Any]]) -> str:
                 null_empty = field.get("null_empty_count", 0)
                 eff_count  = max(0, presence - null_empty)
                 coverage_pct = (eff_count / sampled * 100) if sampled > 0 else 0
-                color = _get_coverage_color(coverage_pct)
-                text_color = "#fff" if coverage_pct < 60 else "#000"
+                band = _coverage_band(coverage_pct)
                 cells.append(
-                    f"<td class='heatmap-cell' style='background-color: {color}; color: {text_color}'>"
+                    f"<td class='heatmap-cell {band}'>"
                     f"{coverage_pct:.0f}%</td>"
                 )
             else:
@@ -2245,11 +2616,11 @@ def _render_coverage_heatmap(objects: list[dict[str, Any]]) -> str:
     return f"""
         <div class="heatmap-legend">
             <span>Coverage:</span>
-            <span class="legend-item" style="background: var(--color-danger)">0-25%</span>
-            <span class="legend-item" style="background: var(--color-caution)">25-50%</span>
-            <span class="legend-item" style="background: var(--color-warning)">50-75%</span>
-            <span class="legend-item" style="background: var(--color-info)">75-90%</span>
-            <span class="legend-item" style="background: var(--color-success)">90-100%</span>
+            <span class="legend-item cov-band cov-l1">0-25%</span>
+            <span class="legend-item cov-band cov-l2">25-50%</span>
+            <span class="legend-item cov-band cov-l3">50-75%</span>
+            <span class="legend-item cov-band cov-l4">75-90%</span>
+            <span class="legend-item cov-band cov-l5">90-100%</span>
         </div>
         <div class="heatmap-container">
             <table class="heatmap-table">
@@ -2264,17 +2635,17 @@ def _render_coverage_heatmap(objects: list[dict[str, Any]]) -> str:
     """
 
 
-def _get_coverage_color(pct: float) -> str:
-    """Get heatmap color for coverage percentage."""
+def _coverage_band(pct: float) -> str:
+    """The one coverage scale used everywhere: CSS class of a soft tinted band."""
     if pct >= 90:
-        return "#22c55e"  # Green
+        return "cov-band cov-l5"   # good
     if pct >= 75:
-        return "#3b82f6"  # Blue
+        return "cov-band cov-l4"   # info
     if pct >= 50:
-        return "#eab308"  # Yellow
+        return "cov-band cov-l3"   # warning
     if pct >= 25:
-        return "#f97316"  # Orange
-    return "#ef4444"  # Red
+        return "cov-band cov-l2"   # caution
+    return "cov-band cov-l1"       # critical
 
 
 def _render_distributions(objects: list[dict[str, Any]], schema_json: dict | None = None, statistics_data: dict | None = None) -> str:
@@ -3103,14 +3474,14 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             --transition-slow: 400ms ease;
 
             /* Semantic colors (shared) */
-            --color-success: #22c55e;
+            --color-success: #63b98c;
             --color-success-light: #86efac;
-            --color-info: #3b82f6;
+            --color-info: #6f9ad8;
             --color-info-light: #93c5fd;
-            --color-warning: #eab308;
+            --color-warning: #d6bd5c;
             --color-warning-light: #fde047;
-            --color-caution: #f97316;
-            --color-danger: #ef4444;
+            --color-caution: #e0965a;
+            --color-danger: #e47a90;
             --color-danger-light: #fca5a5;
         }}
 
@@ -3141,6 +3512,20 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
 
             --header-bg: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+
+            /* Status colours, softened for night mode (lighter, desaturated) */
+            --color-success: #63b98c;
+            --color-info: #6f9ad8;
+            --color-warning: #d6bd5c;
+            --color-caution: #e0965a;
+            --color-danger: #e47a90;
+            /* Ink for text on tinted status backgrounds */
+            --ink-success: #a3dcbd;
+            --ink-info: #b2cbef;
+            --ink-warning: #ecdc9a;
+            --ink-caution: #f2c39a;
+            --ink-danger: #f4b0bf;
+            --tint: 22%;
         }}
 
         /* ═══ LIGHT THEME (Day Mode) ═══ */
@@ -3168,6 +3553,20 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
             --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
             --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+
+            /* Status colours, softened for day mode (deeper, desaturated) */
+            --color-success: #2f8f62;
+            --color-info: #3f74c4;
+            --color-warning: #b0901f;
+            --color-caution: #cf7a2f;
+            --color-danger: #c4475f;
+            /* Ink for text on tinted status backgrounds */
+            --ink-success: #1d6343;
+            --ink-info: #284f8c;
+            --ink-warning: #6f5a0c;
+            --ink-caution: #8c4a17;
+            --ink-danger: #9a2f45;
+            --tint: 16%;
 
             --header-bg: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
         }}
@@ -3305,13 +3704,18 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             color: var(--text-primary);
         }}
         .brand-accent {{ color: #0ea5e9; }}
-        .brand-sub {{
-            font-size: 0.62rem;
+        .header-tagline {{
+            align-self: flex-start;
+            font-size: 0.7rem;
             font-weight: 600;
-            letter-spacing: 3px;
-            text-transform: uppercase;
+            letter-spacing: 0.4px;
             color: var(--text-secondary);
+            margin: 0 0 4px 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }}
+        .header-tagline::before {{ content: "◆ "; color: #0ea5e9; }}
 
         .visually-hidden {{
             position: absolute;
@@ -3879,20 +4283,18 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             border-radius: var(--radius-sm);
         }}
 
-        .coverage-high {{
-            background: var(--color-success);
-            color: #000;
-        }}
-
-        .coverage-medium {{
-            background: var(--color-warning);
-            color: #000;
-        }}
-
-        .coverage-low {{
-            background: var(--color-danger);
-            color: #fff;
-        }}
+        /* One coverage scale (heatmap, field explorer, drift tables): soft tints + readable ink */
+        .cov-band {{ font-weight: 600; }}
+        .cov-l5 {{ background: color-mix(in srgb, var(--color-success) var(--tint), var(--bg-card)) !important; color: var(--ink-success) !important; }}
+        .cov-l4 {{ background: color-mix(in srgb, var(--color-info) var(--tint), var(--bg-card)) !important; color: var(--ink-info) !important; }}
+        .cov-l3 {{ background: color-mix(in srgb, var(--color-warning) var(--tint), var(--bg-card)) !important; color: var(--ink-warning) !important; }}
+        .cov-l2 {{ background: color-mix(in srgb, var(--color-caution) var(--tint), var(--bg-card)) !important; color: var(--ink-caution) !important; }}
+        .cov-l1 {{ background: color-mix(in srgb, var(--color-danger) var(--tint), var(--bg-card)) !important; color: var(--ink-danger) !important; }}
+        .coverage-badge.cov-band {{ border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }}
+        /* legacy class names kept for compatibility */
+        .coverage-high {{ background: color-mix(in srgb, var(--color-success) var(--tint), var(--bg-card)); color: var(--ink-success); }}
+        .coverage-medium {{ background: color-mix(in srgb, var(--color-warning) var(--tint), var(--bg-card)); color: var(--ink-warning); }}
+        .coverage-low {{ background: color-mix(in srgb, var(--color-danger) var(--tint), var(--bg-card)); color: var(--ink-danger); }}
 
         /* Null/Empty Cell Highlighting */
         .null-cell {{
@@ -4176,10 +4578,31 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
            QUALITY TAB
            ═══════════════════════════════════════════════════════════════════════ */
         .quality-overview {{
-            display: flex;
-            justify-content: center;
-            margin-bottom: var(--space-md);
+            display: grid;
+            grid-template-columns: minmax(200px, 250px) minmax(0, 1fr);
+            gap: var(--space-lg);
+            align-items: stretch;
+            margin-bottom: var(--space-lg);
         }}
+        @media (max-width: 900px) {{ .quality-overview {{ grid-template-columns: 1fr; }} }}
+        .dqi-panel {{
+            display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+            gap: var(--space-sm); padding: var(--space-md) var(--space-lg);
+            background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: var(--radius-lg);
+        }}
+        .dqi-title {{ margin: 0 0 var(--space-sm) 0; align-self: flex-start; font-size: 1rem; }}
+        .dqi-dial {{ position: relative; width: 124px; height: 124px; margin: auto 0; }}
+        .dqi-dial svg {{ display: block; }}
+        .dqi-center {{
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 2px;
+        }}
+        .dqi-value {{ font-size: 1.6rem; font-weight: 800; line-height: 1; color: var(--text-primary);
+                      font-variant-numeric: tabular-nums; letter-spacing: -1px; }}
+        .dqi-kpi {{ font-size: .68rem; font-weight: 700; letter-spacing: .14em; color: var(--text-secondary); }}
+        .dqi-grade {{ margin-top: 3px; font-size: .62rem; font-weight: 700; border: 1px solid;
+                      border-radius: 999px; padding: 1px 10px; }}
+        .dqi-caption {{ font-size: .8rem; color: var(--text-tertiary); text-align: center; }}
 
         .overall-dqi-circle {{
             display: flex;
@@ -4514,15 +4937,16 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
 
         /* New: Schema dimensions radar + Insights/SWOT/Recommendations + Patterns + Joins + Similar */
         .schema-dimensions {{
-            margin-left: var(--space-lg);
-            padding: var(--space-md);
+            padding: var(--space-md) var(--space-lg);
             background: var(--bg-secondary);
-            border-radius: 8px;
-            display: inline-flex;
+            border: 1px solid var(--border-primary);
+            border-radius: var(--radius-lg);
+            display: flex;
             flex-direction: column;
             align-items: center;
+            min-width: 0;
         }}
-        .schema-dimensions h4 {{ margin: 0 0 var(--space-sm) 0; }}
+        .schema-dimensions h4 {{ margin: 0 0 var(--space-sm) 0; align-self: flex-start; font-size: 1rem; }}
 
         .insights-section h3 {{ margin-top: var(--space-lg); }}
         .data-story {{
@@ -5340,9 +5764,9 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             justify-content: center;
             background: rgba(0,0,0,0.2);
         }}
-        .cover-verdict-ring.healthy {{ border-color: #22c55e; }}
-        .cover-verdict-ring.attention {{ border-color: #eab308; }}
-        .cover-verdict-ring.risk {{ border-color: #ef4444; }}
+        .cover-verdict-ring.healthy {{ border-color: var(--color-success); }}
+        .cover-verdict-ring.attention {{ border-color: var(--color-warning); }}
+        .cover-verdict-ring.risk {{ border-color: var(--color-danger); }}
         .cover-verdict-score {{
             font-size: 1.8rem;
             font-weight: 800;
@@ -5508,11 +5932,11 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
                 <img class="logo-mark logo-mark-dark" src="{logo_icon_dark}" alt="">
                 <span class="brand">
                     <span class="brand-name"><span class="brand-accent">Data</span>lens</span>
-                    <span class="brand-sub">Schema Analysis</span>
                 </span>
-                <h1 class="visually-hidden">Datalens Schema Analysis</h1>
+                <h1 class="visually-hidden">Datalens — Data Health Intelligence</h1>
             </div>
             <div class="header-search">
+                <div class="header-tagline">{tagline}</div>
                 <input type="text" class="search-input" id="globalSearch" placeholder="🔍 Search fields, objects, values across all tabs…" autocomplete="off">
                 <div class="search-status" id="searchStatus"></div>
             </div>
@@ -5558,19 +5982,19 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
                 <span class="chapter-icon">📊</span>
                 <span>Verdict</span>
             </button>
-            <button class="chapter-btn" data-chapter="shape" onclick="switchChapter('shape')">
-                <span class="chapter-icon">💡</span>
-                <span>Shape</span>
-            </button>
             <button class="chapter-btn" data-chapter="health" onclick="switchChapter('health')">
                 <span class="chapter-icon">✅</span>
                 <span>Health</span>
             </button>
-            <button class="chapter-btn" data-chapter="structure" onclick="switchChapter('structure')">
+            <button class="chapter-btn" data-chapter="shape" onclick="switchChapter('shape')">
+                <span class="chapter-icon">💡</span>
+                <span>Shape</span>
+            </button>
+            <button class="chapter-btn" data-chapter="structure" data-persona-hide="business" onclick="switchChapter('structure')">
                 <span class="chapter-icon">🔗</span>
                 <span>Structure</span>
             </button>
-            <button class="chapter-btn" data-chapter="fingerprint" onclick="switchChapter('fingerprint')">
+            <button class="chapter-btn" data-chapter="fingerprint" data-persona-hide="business" onclick="switchChapter('fingerprint')">
                 <span class="chapter-icon">🔬</span>
                 <span>Fingerprint</span>
             </button>
@@ -5597,7 +6021,19 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             {overview}
         </div>
 
-        <div class="tab-content" id="trends" data-chapter="fingerprint" data-print-title="Trends &amp; Drift">
+        <div class="tab-content" id="action-plan" data-chapter="verdict" data-print-title="Action Plan">
+            {action_plan}
+        </div>
+
+        <div class="tab-content" id="how-scored" data-chapter="verdict" data-print-title="How scores work">
+            {how_scored}
+        </div>
+
+        <div class="tab-content" id="contract" data-chapter="health" data-print-title="Expected Schema">
+            {contract}
+        </div>
+
+        <div class="tab-content" id="trends" data-chapter="health" data-print-title="Trends &amp; Drift">
             {trends}
         </div>
 
@@ -5633,7 +6069,7 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             {insights}
         </div>
 
-        <div class="tab-content" id="ai-insights" data-chapter="shape" data-print-title="AI Insights">
+        <div class="tab-content" id="ai-insights" data-chapter="verdict" data-print-title="AI Review">
             {ai_insights}
         </div>
 
@@ -5666,7 +6102,7 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
 
     <!-- Datalens Footer -->
     <footer style="text-align: center; padding: 20px; border-top: 1px solid var(--border-color); color: var(--text-secondary); font-size: 12px; margin-top: 40px;">
-        <div style="margin-bottom: 8px;">Generated with <strong>Datalens</strong> — Advanced Schema Analysis & Data Profiling</div>
+        <div style="margin-bottom: 8px;">Generated with <strong>Datalens</strong> — Data Health Intelligence</div>
         <div style="opacity: 0.7;">Open-source & lightweight • Works offline • Zero dependencies</div>
     </footer>
 
@@ -5692,13 +6128,27 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
         // ═══════════════════════════════════════════════════════════════════════
         // PERSONA SWITCHING
         // ═══════════════════════════════════════════════════════════════════════
+        function isHiddenForPersona(el) {{
+            const hide = (el && el.dataset.personaHide) || '';
+            return hide.split(' ').includes(document.body.getAttribute('data-persona'));
+        }}
+        function visibleTabs(container) {{
+            return container ? Array.from(container.querySelectorAll('.tab')).filter(t => !isHiddenForPersona(t)) : [];
+        }}
         function setPersona(persona) {{
             document.body.setAttribute('data-persona', persona);
-            localStorage.setItem('datalens-persona', persona);
+            try {{ localStorage.setItem('datalens-persona', persona); }} catch (e) {{}}
 
             document.querySelectorAll('.persona-btn').forEach(btn => {{
                 btn.classList.toggle('active', btn.dataset.persona === persona);
             }});
+            // If the open tab (or its chapter) isn't part of this view, move to one that is.
+            const active = document.querySelector('.tab.active');
+            const chapterBtn = document.querySelector('.chapter-btn.active');
+            if ((active && isHiddenForPersona(active)) || (chapterBtn && isHiddenForPersona(chapterBtn))) {{
+                const chapter = chapterBtn && !isHiddenForPersona(chapterBtn) ? chapterBtn.dataset.chapter : 'verdict';
+                if (typeof switchChapter === 'function') switchChapter(chapter);
+            }}
         }}
 
         // Load saved persona or default to technical.
@@ -5712,7 +6162,7 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
         // ═══════════════════════════════════════════════════════════════════════
         // CHAPTER NAVIGATION
         // ═══════════════════════════════════════════════════════════════════════
-        let currentChapter = 'verdict';
+        var currentChapter = currentChapter || 'verdict';  // may already be set by setPersona() above
 
         function switchChapter(chapter) {{
             currentChapter = chapter;
@@ -5731,8 +6181,8 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
                 chapterTabs.classList.add('active');
             }}
 
-            // Activate the first tab in this chapter
-            const firstTab = chapterTabs?.querySelector('.tab');
+            // Activate the first tab in this chapter that the current view shows
+            const firstTab = visibleTabs(chapterTabs)[0];
             if (firstTab) {{
                 // Deactivate all tabs and contents
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -6078,51 +6528,11 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
             optionsId: 'trendsObjectFilterOptions',
             selectAllId: 'trendsObjectSelectAll',
             idPrefix: 'trends-object-filter',
-            getItems: () => Array.from(document.querySelectorAll('#trends .drift-table tbody tr')),
-            getObjectName: (row) => row.children[0] ? row.children[0].textContent.trim() : '',
-            setVisible: (row, visible) => {{ row.style.display = visible ? '' : 'none'; }},
+            getItems: () => Array.from(document.querySelectorAll(
+                '#trends .drift-table tbody tr, #trends .chg-table tbody tr, #trends .drift-list li[data-object]')),
+            getObjectName: (el) => el.dataset.object || (el.children[0] ? el.children[0].textContent.trim() : ''),
+            setVisible: (el, visible) => {{ el.style.display = visible ? '' : 'none'; }},
         }});
-
-        // Export every drift change (across all drift tables, respecting the object
-        // filter) as a single CSV to share with a content producer.
-        function exportDriftChanges() {{
-            const cards = Array.from(document.querySelectorAll('#trends .card'))
-                .filter(card => card.querySelector('table.drift-table'));
-            const out = [['Change Type', 'Object', 'Field', 'Details']];
-            cards.forEach(card => {{
-                const heading = card.querySelector('.card-header h3');
-                const changeType = heading
-                    ? heading.childNodes[0].textContent.trim()
-                    : 'Change';
-                const headerCells = Array.from(card.querySelectorAll('thead th'))
-                    .map(th => th.textContent.trim());
-                card.querySelectorAll('table.drift-table tbody tr').forEach(tr => {{
-                    if (tr.style.display === 'none') return;  // respect the object filter
-                    const cells = Array.from(tr.children).map(td =>
-                        td.textContent.replace(/\\s+/g, ' ').trim());
-                    const obj = cells[0] || '';
-                    const field = cells[1] || '';
-                    // Remaining columns become "Header=value; ..." detail.
-                    const details = cells.slice(2)
-                        .map((v, i) => `${{headerCells[i + 2] || 'col'}}: ${{v}}`)
-                        .filter(s => s && !s.endsWith(': '))
-                        .join('; ');
-                    out.push([changeType, obj, field, details]);
-                }});
-            }});
-            if (out.length === 1) {{ alert('No drift changes to export.'); return; }}
-            const csv = out.map(row => row.map(cell => {{
-                let t = String(cell).replace(/"/g, '""');
-                return (t.includes(',') || t.includes('"') || t.includes('\\n')) ? `"${{t}}"` : t;
-            }}).join(',')).join('\\n');
-            const blob = new Blob([csv], {{ type: 'text/csv;charset=utf-8;' }});
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = 'schema-drift-changes.csv';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }}
 
         // ═══════════════════════════════════════════════════════════════════════
         // EXPORT TABLE TO CSV

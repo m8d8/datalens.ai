@@ -44,6 +44,30 @@ class Config:
     sample_records_count: int = 3
     """Number of full sample records to include in output."""
 
+    sample_strategy: str = "reservoir"
+    """
+    How records are picked when sample_size > 0 (file sources):
+    - "reservoir": uniform random sample over the whole file (default; sees new rows
+      appended at the end, needed for day-over-day drift).
+    - "head": first N records (fastest; biased towards the oldest rows).
+    - "tail": last N records (newest rows of append-only feeds).
+    """
+
+    sample_seed: int = 42
+    """Random seed for reservoir sampling, so repeated runs on the same data are identical."""
+
+    distinct_track_limit: int = 1_000_000
+    """
+    Exact distinct counting is kept per field up to this many distinct values
+    (in memory only, as hashes). Beyond it the count is reported as a lower bound.
+    """
+
+    pii_ignore: list[str] = field(default_factory=list)
+    """Field patterns ("object.path", wildcards allowed, e.g. "teams.name", "venues.*") never treated as PII."""
+
+    pii_force: dict[str, str] = field(default_factory=dict)
+    """Field patterns always treated as PII of the given type, e.g. {"players.contact": "email"}."""
+
     # Cardinality
     low_cardinality_threshold: int = 50
     """Fields with <= this many distinct values are flagged as low cardinality."""
@@ -62,6 +86,16 @@ class Config:
     report_coverage_increase_exceeds: bool = True
     """Flag fields whose coverage rose beyond their resolved threshold."""
 
+    expected_schemas: list[str] = field(default_factory=list)
+    """BYOS: expected JSON Schema files, "path.json" or "OBJECT=path.json" (see datalens.contract)."""
+
+    drift: dict[str, Any] = field(default_factory=dict)
+    """
+    Drift rules and comparison mode (see datalens.drift.rules), e.g.
+    {"compare_to": "rolling", "defaults": {"row_count": {"drop_pct": 20}},
+     "objects": {"orders": {"fields": {"id": {"coverage": {"drop_pct": 5}}}}}}
+    """
+
     # History retention (see history.store.HistoryStore.purge_expired)
     history_retention_days: int = 0
     """Delete saved .history runs older than this many days. 0 = keep forever."""
@@ -76,6 +110,9 @@ class Config:
     version_tag: str = ""
     """Version tag for this run. Empty = auto-generate timestamp."""
 
+    run_date: str | None = None
+    """Logical date of the data (--run-date). Orders history and anchors "1 day / 7 days / 1 month" deltas."""
+
     # PII
     mask_pii: bool = True
     """Whether to mask detected PII in reports."""
@@ -83,6 +120,13 @@ class Config:
     # AI
     ai_provider: str = ""
     """AI provider to use for insights. Empty = disabled."""
+
+    ai_model: str = "auto"
+    """
+    Model for the AI provider. "auto" (default) lets the provider choose: CLI logins use
+    their own default model; API providers use their current default. A model that the
+    provider rejects is logged and the call is retried with "auto".
+    """
 
     # Connection config
     connection_config_file: str | None = None

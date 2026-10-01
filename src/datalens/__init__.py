@@ -1,5 +1,5 @@
 """
-Datalens.ai — Advanced Schema Analysis & Data Profiling
+Datalens.ai — Data Health Intelligence
 
 A domain-agnostic tool for analyzing schemas, profiling data quality,
 discovering patterns and relationships, and generating rich interactive reports.

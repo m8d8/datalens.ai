@@ -161,10 +161,9 @@ def _compute_coverage(field: dict[str, Any], sampled: int) -> float:
     Returns:
         Coverage as percentage (0–100).
     """
-    if sampled == 0:
-        return 0.0
-    presence = field.get("presence_count", 0)
-    return (presence / sampled) * 100.0
+    from datalens.profiling.coverage import coverage_pct
+
+    return coverage_pct(field, sampled)  # true coverage: missing/null/empty excluded
 
 
 def _compute_null_percentage(field: dict[str, Any]) -> float:

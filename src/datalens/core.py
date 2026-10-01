@@ -15,7 +15,11 @@ from typing import Any
 
 from datalens.config import Config
 from datalens.connectors.registry import get_connector
-from datalens.profiling.sampler import profile_source
+from datalens.profiling.sampler import ProfileScratch, profile_source
+from datalens.contract import load_expected_schemas, validate_contract
+from datalens.drift import DriftRules, build_drift_report, extract_metrics
+from datalens.drift.metrics import extract_categories
+from datalens.profiling.masking import mask_schema, raw_values_for_masked_fields, scrub
 from datalens.profiling.pii import detect_pii_in_schema, get_pii_summary
 from datalens.profiling.quality import compute_schema_quality
 from datalens.profiling.statistics import compute_statistics_summary
@@ -23,7 +27,7 @@ from datalens.profiling.relationships import analyze_relationships
 from datalens.profiling.patterns import analyze_patterns
 from datalens.profiling.joins import analyze_joins
 from datalens.profiling.insights import build_insights
-from datalens.profiling.decision import build_decision_layer
+from datalens.profiling.decision import build_decision_layer, refresh_drift_driver, refresh_next_steps
 from datalens.history.diff import detect_drift
 from datalens.ai.service import run_ai_insights
 from datalens.report.html_report import generate_html_report
@@ -91,6 +95,18 @@ class AnalysisResult:
     coverage_drift_json: dict[str, Any] | None = None
     """Machine-readable coverage-drift artifact (per-field %-change + threshold breaches), if drift was computed."""
 
+    drift_report: dict[str, Any] | None = None
+    """Drift vs the reference (previous run, baseline or rolling band): every finding with its rule."""
+
+    metrics: dict[str, float] | None = None
+    """Flat run metrics (row counts, coverage, scores…) saved to history for rolling baselines."""
+
+    contract: dict[str, Any] | None = None
+    """BYOS: conformance of this run to the expected schema(s), with every check."""
+
+    categories: dict[str, list[str]] | None = None
+    """Values of category-like fields, saved to history so rolling mode knows which values are normal."""
+
     # Optional
     ai_insights: dict[str, Any] | None = None
     """AI-generated insights (only if AI provider configured)."""
@@ -102,11 +118,36 @@ class AnalysisResult:
     """Any warnings encountered during analysis."""
 
 
+def _with_contract_rules(
+    drift_cfg: dict[str, Any], expected: list[Any], schema_json: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge x-datalens thresholds from expected schemas into the drift rules (config wins)."""
+    if not expected:
+        return drift_cfg
+    from datalens.drift.rules import _merge
+
+    names = [o["object"] for o in schema_json.get("objects", [])]
+    contract_objects: dict[str, Any] = {}
+    for exp in expected:
+        entry = exp.drift_rules()
+        if not entry:
+            continue
+        targets = [exp.object] if exp.object else names
+        for name in targets:
+            contract_objects[name] = _merge(contract_objects.get(name, {}), entry)
+    merged = dict(drift_cfg or {})
+    merged["objects"] = _merge(contract_objects, merged.get("objects") or {})
+    return merged
+
+
 def analyze(
     source_spec: dict[str, Any],
     config: Config | None = None,
     *,
     previous_schema: dict[str, Any] | None = None,
+    history_runs: list[dict[str, Any]] | None = None,
+    drift_mode: str | None = None,
+    reference_tag: str | None = None,
 ) -> AnalysisResult:
     """
     Run schema analysis on a data source.
@@ -118,8 +159,14 @@ def analyze(
             - For mongodb: db, collections or objects (list of "coll|query -> tag")
             - ... (see CLI grammar for full spec)
         config: Optional Config object. If None, uses defaults.
-        previous_schema: Optional schema JSON from a prior run. When provided,
-            schema drift is computed and a decision layer is derived from it.
+        previous_schema: Optional schema JSON from a prior run (the reference:
+            previous run or fixed baseline). When provided, drift is computed
+            and the decision layer is derived from it.
+        history_runs: Optional earlier runs, newest first, as returned by
+            ``HistoryStore.load_runs()`` — needed for ``rolling`` mode.
+        drift_mode: "previous" | "baseline:<tag>" | "rolling". Defaults to
+            ``config.drift["compare_to"]`` (or "previous").
+        reference_tag: Version tag of ``previous_schema``, shown in the report.
 
     Returns:
         AnalysisResult with schema JSON, summary, HTML report, and metadata.
@@ -136,20 +183,40 @@ def analyze(
     try:
         connector.connect()
 
-        # Profile the source
-        schema_json = profile_source(connector, config)
+        # Profile the source. The scratch keeps exact value hashes and a row
+        # sample in memory only (never written to disk or the report).
+        scratch = ProfileScratch()
+        schema_json = profile_source(connector, config, scratch=scratch)
 
         # Phase 3+: Advanced analytics
         patterns_data = analyze_patterns(schema_json)
         quality_data = compute_schema_quality(schema_json, patterns_data=patterns_data)
-        pii_data = detect_pii_in_schema(schema_json)
+        pii_data = detect_pii_in_schema(
+            schema_json, ignore=config.pii_ignore, force=config.pii_force,
+        )
         pii_summary = get_pii_summary(pii_data) if pii_data else None
         statistics_data = compute_statistics_summary(schema_json)
         relationships_data = analyze_relationships(schema_json)
-        joins_data = analyze_joins(schema_json)
+        joins_data = analyze_joins(schema_json, scratch=scratch)
         insights_data = build_insights(
             schema_json, quality_data, joins_data, patterns_data, pii_summary,
         )
+
+        # Everything that leaves the process (HTML, schema JSON, history, AI) is
+        # built from a masked copy: analytics above needed the raw values.
+        if config.mask_pii:
+            raw_pii = raw_values_for_masked_fields(schema_json, pii_data)
+            schema_json, masked_fields = mask_schema(schema_json, pii_data)
+            patterns_data = scrub(patterns_data, raw_pii)
+            statistics_data = scrub(statistics_data, raw_pii)
+            relationships_data = scrub(relationships_data, raw_pii)
+            joins_data = scrub(joins_data, raw_pii)
+            insights_data = scrub(insights_data, raw_pii)
+        else:
+            masked_fields = []
+        if pii_summary is not None:
+            pii_summary["masking_enabled"] = bool(config.mask_pii)
+            pii_summary["masked_fields"] = masked_fields
 
         # Generate summary
         summary_md = generate_summary(schema_json, config)
@@ -194,13 +261,48 @@ def analyze(
             coverage_drift_json=schema_diff.to_coverage_drift_json() if schema_diff is not None else None,
             warnings=[],
         )
+        # Drift report (rules + optional learned baseline), computed on the
+        # masked schema so it matches what history stores.
+        # BYOS: expected schemas are validated, and their x-datalens thresholds
+        # become drift rules for the objects they describe.
+        expected = load_expected_schemas(config.expected_schemas) if config.expected_schemas else []
+        result.contract = validate_contract(schema_json, expected)
+        rules = DriftRules(_with_contract_rules(config.drift, expected, schema_json))
+        mode = drift_mode or rules.compare_to
+        runs = history_runs or []
+        reference_metrics = next((r["metrics"] for r in runs if r.get("tag") == reference_tag), None)
+        if reference_metrics is None and previous_schema is not None:
+            reference_metrics = extract_metrics(previous_schema)
+
+        fk_fields = {
+            tuple(link["child"].split(".", 1)) for link in (joins_data or {}).get("referential_integrity", [])
+        }
+
+        def _drift(metrics: dict[str, float]) -> dict[str, Any] | None:
+            return build_drift_report(
+                schema_json, metrics, rules=rules, mode=mode, reference_tag=reference_tag,
+                reference_schema=previous_schema, reference_metrics=reference_metrics,
+                history=runs, reference_fields=fk_fields,
+            )
+
+        result.metrics = extract_metrics(schema_json, joins=joins_data, quality=result.quality)
+        result.categories = extract_categories(schema_json, joins=joins_data)
+        result.drift_report = _drift(result.metrics)
         result.decision = build_decision_layer(result, schema_diff)
+        # Health depends on drift, so its own drift is evaluated afterwards.
+        result.metrics["health||"] = result.decision["health_verdict"]["score"]
+        if result.drift_report is not None:
+            result.drift_report = _drift(result.metrics)
+            refresh_drift_driver(result.decision, result.drift_report)
 
         # Optional AI insights (network / CLI — only when configured).
         ai_insights, ai_insights_md = run_ai_insights(result, config)
         if ai_insights is not None:
             result.ai_insights = ai_insights
             result.ai_insights_md = ai_insights_md
+            refresh_next_steps(result, result.decision)  # merge AI suggestions into the plan
+            if ai_insights.get("model_note"):
+                result.warnings.append(ai_insights["model_note"])
             if not ai_insights.get("enabled"):
                 result.warnings.append(
                     f"AI provider did not produce insights: {ai_insights.get('error', 'unknown')}"
@@ -221,6 +323,11 @@ def analyze(
             diff=schema_diff,
             previous_schema=previous_schema,
             decision=result.decision,
+            drift_report=result.drift_report,
+            contract=result.contract,
+            history=history_runs,
+            current_metrics=result.metrics,
+            current_run_date=config.run_date,
             ai_insights=result.ai_insights,
             include_pii=True,
             include_quality=True,

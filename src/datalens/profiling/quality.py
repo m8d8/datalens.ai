@@ -16,6 +16,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from datalens.profiling.coverage import coverage_pct
+from datalens.profiling.naming import is_identifier_name
+
 
 @dataclass
 class QualityDimension:
@@ -25,6 +28,22 @@ class QualityDimension:
     score: float  # 0-100
     weight: float  # Contribution to overall DQI
     details: dict[str, Any] = field(default_factory=dict)
+
+
+DIMENSION_WEIGHTS: dict[str, float] = {
+    "completeness": 0.30,
+    "consistency": 0.25,
+    "uniqueness": 0.20,
+    "validity": 0.25,
+    "timeliness": 0.10,
+    "granularity": 0.10,
+    "accuracy": 0.15,
+}
+"""Relative weight of each DQI dimension. An object's DQI is the weighted mean of the
+dimensions that could be scored for it (weights are re-normalised over those)."""
+
+FIELD_SCORE_WEIGHTS = {"completeness": 0.4, "consistency": 0.3, "validity": 0.3}
+"""Per-field quality score = 0.4·completeness + 0.3·consistency + 0.3·validity."""
 
 
 @dataclass
@@ -40,7 +59,9 @@ class FieldQuality:
     @property
     def overall(self) -> float:
         """Compute overall field quality score."""
-        return (self.completeness * 0.4 + self.consistency * 0.3 + self.validity * 0.3)
+        w = FIELD_SCORE_WEIGHTS
+        return (self.completeness * w["completeness"] + self.consistency * w["consistency"]
+                + self.validity * w["validity"])
 
 
 @dataclass
@@ -95,6 +116,8 @@ class SchemaQuality:
         counts: dict[str, int] = {}
         for obj in self.objects:
             for dim in obj.all_dimensions():
+                if dim.weight <= 0:
+                    continue  # not scored for this object
                 totals[dim.name] = totals.get(dim.name, 0.0) + dim.score
                 counts[dim.name] = counts.get(dim.name, 0) + 1
         return {k: round(totals[k] / counts[k], 1) for k in totals}
@@ -192,10 +215,12 @@ def compute_field_quality(field_data: dict[str, Any], sampled: int) -> FieldQual
     if completeness < 50:
         issues.append(f"Low completeness: {completeness:.0f}%")
 
-    # Consistency: single-type dominance
-    total_type_count = sum(types.values())
+    # Consistency: share of non-null values that have the dominant type.
+    # Nulls are a completeness matter, so they don't count against consistency.
+    non_null_types = {t: c for t, c in types.items() if t != "null" and c > 0}
+    total_type_count = sum(non_null_types.values())
     if total_type_count > 0:
-        dominant_count = max(types.values())
+        dominant_count = max(non_null_types.values())
         consistency = (dominant_count / total_type_count) * 100
     else:
         consistency = 100  # No data = no inconsistency
@@ -243,7 +268,20 @@ def compute_object_quality(obj_data: dict[str, Any]) -> ObjectQuality:
     sampled = obj_data.get("sampled", 0)
 
     # Compute per-field quality
-    field_qualities = [compute_field_quality(f, sampled) for f in fields]
+    # Nested fields are judged against their parent: `extras.wides` is only
+    # expected when an `extras` object exists, so its completeness is measured
+    # over the rows that have the parent (conditional completeness).
+    by_path = {f.get("path", ""): f for f in fields}
+
+    def _base(f: dict[str, Any]) -> int:
+        path = f.get("path", "")
+        parent = path.rsplit(".", 1)[0] if "." in path else None
+        pf = by_path.get(parent) if parent else None
+        if pf is None:
+            return sampled
+        return max(1, pf.get("presence_count", 0) - pf.get("null_empty_count", 0))
+
+    field_qualities = [compute_field_quality(f, _base(f)) for f in fields]
 
     # Aggregate completeness (average across fields)
     if field_qualities:
@@ -254,11 +292,12 @@ def compute_object_quality(obj_data: dict[str, Any]) -> ObjectQuality:
     completeness = QualityDimension(
         name="completeness",
         score=avg_completeness,
-        weight=0.30,
+        weight=DIMENSION_WEIGHTS["completeness"],
         details={
             "total_fields": len(fields),
-            "high_coverage_fields": sum(1 for f in field_qualities if f.completeness >= 90),
-            "low_coverage_fields": sum(1 for f in field_qualities if f.completeness < 50),
+            # Counts use true coverage (missing/null/empty excluded), like every coverage figure.
+            "high_coverage_fields": sum(1 for f in fields if coverage_pct(f, sampled) >= 90),
+            "low_coverage_fields": sum(1 for f in fields if coverage_pct(f, sampled) < 50),
         },
     )
 
@@ -272,41 +311,47 @@ def compute_object_quality(obj_data: dict[str, Any]) -> ObjectQuality:
     consistency = QualityDimension(
         name="consistency",
         score=avg_consistency,
-        weight=0.25,
+        weight=DIMENSION_WEIGHTS["consistency"],
         details={
             "uniform_type_fields": len(field_qualities) - len(multi_type_fields),
             "multi_type_fields": len(multi_type_fields),
         },
     )
 
-    # Uniqueness: check ID-like fields
+    # Uniqueness: does the object have a unique identifier? Only top-level
+    # identifier-shaped fields are candidates (tokens like id/uuid/guid/key/code,
+    # so "video" or "valid" don't count). Repeating *references* to other
+    # objects (customer_id in orders) are expected and not penalised: the score
+    # is the distinct ratio of the most unique candidate.
     id_fields = [
         f for f in fields
-        if any(
-            kw in f.get("path", "").lower()
-            for kw in ("_id", "id", "uuid", "guid", "key")
-        )
+        if "." not in f.get("path", "") and "[]" not in f.get("path", "")
+        and is_identifier_name(f.get("path", ""))
     ]
+    best_key, best_ratio = None, 0.0
+    for f in id_fields:
+        present = max(1, f.get("presence_count", 0) - f.get("null_empty_count", 0))
+        ratio = min(1.0, f.get("distinct_count_in_sample", 0) / max(present, 1)) if sampled else 0.0
+        if ratio > best_ratio:
+            best_key, best_ratio = f.get("path"), ratio
     if id_fields and sampled > 0:
-        # Check if ID fields have high cardinality
-        high_cardinality = sum(
-            1 for f in id_fields
-            if f.get("distinct_count_in_sample", 0) >= sampled * 0.9
-        )
-        uniqueness_score = (high_cardinality / len(id_fields)) * 100
+        uniqueness_score = 100.0 if best_ratio >= 0.99 else round(best_ratio * 100, 1)
     else:
-        uniqueness_score = 100  # No ID fields to check
+        uniqueness_score = 100  # No identifier to check
 
     uniqueness = QualityDimension(
         name="uniqueness",
         score=uniqueness_score,
-        weight=0.20,
+        weight=DIMENSION_WEIGHTS["uniqueness"],
         details={
             "id_fields_checked": len(id_fields),
+            "key_field": best_key,
+            "key_distinct_ratio": round(best_ratio, 4),
             "unique_id_fields": sum(
                 1 for f in id_fields
-                if f.get("distinct_count_in_sample", 0) >= sampled * 0.9
-            ) if sampled > 0 else 0,
+                if f.get("distinct_count_in_sample", 0)
+                >= 0.99 * max(1, f.get("presence_count", 0) - f.get("null_empty_count", 0))
+            ),
         },
     )
 
@@ -319,7 +364,7 @@ def compute_object_quality(obj_data: dict[str, Any]) -> ObjectQuality:
     validity = QualityDimension(
         name="validity",
         score=avg_validity,
-        weight=0.25,
+        weight=DIMENSION_WEIGHTS["validity"],
         details={
             "fields_with_issues": sum(1 for f in field_qualities if f.issues),
         },
@@ -357,7 +402,7 @@ def _compute_timeliness(date_fields: list[dict[str, Any]]) -> QualityDimension:
     """Score timeliness by inspecting sample date values for recency and future-date issues."""
     import datetime as _dt
 
-    now = _dt.datetime.utcnow()
+    now = _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
     parsed_ages_days: list[float] = []
     future_count = 0
     parsed_count = 0
@@ -377,7 +422,16 @@ def _compute_timeliness(date_fields: list[dict[str, Any]]) -> QualityDimension:
         except (ValueError, AttributeError):
             return None
 
+    newest_age: float | None = None
+    newest_field = None
     for f in date_fields:
+        # The newest record decides freshness ("is this data up to date?");
+        # historical archives shouldn't be penalised for also holding old rows.
+        latest = _try_parse((f.get("date_range") or {}).get("max"))
+        if latest is not None:
+            age = (now - latest).days
+            if age >= 0 and (newest_age is None or age < newest_age):
+                newest_age, newest_field = age, f.get("path")
         for v in (f.get("examples") or [])[:20]:
             parsed = _try_parse(v)
             if not parsed:
@@ -388,17 +442,20 @@ def _compute_timeliness(date_fields: list[dict[str, Any]]) -> QualityDimension:
                 future_count += 1
             else:
                 parsed_ages_days.append(delta)
+    if newest_age is not None:
+        parsed_ages_days = [newest_age]
 
     if not parsed_ages_days:
         # No parseable dates — give neutral mid-score so we don't false-claim freshness
         return QualityDimension(
             name="timeliness",
             score=70.0,
-            weight=0.10,
+            weight=DIMENSION_WEIGHTS["timeliness"],
             details={"date_fields": len(date_fields), "parseable": parsed_count},
         )
 
-    median_age = sorted(parsed_ages_days)[len(parsed_ages_days) // 2]
+    median_age = (newest_age if newest_age is not None
+                  else sorted(parsed_ages_days)[len(parsed_ages_days) // 2])
     # 0 days → 100, 30 days → ~90, 365 → ~60, 3650 → ~10
     import math
     recency_score = max(0.0, 100.0 - 25.0 * math.log10(max(1.0, median_age + 1)))
@@ -408,26 +465,39 @@ def _compute_timeliness(date_fields: list[dict[str, Any]]) -> QualityDimension:
     return QualityDimension(
         name="timeliness",
         score=score,
-        weight=0.10,
+        weight=DIMENSION_WEIGHTS["timeliness"],
         details={
             "date_fields": len(date_fields),
             "parseable_samples": parsed_count,
             "median_age_days": int(median_age),
+            "age_basis": "newest record" if newest_age is not None else "median of examples",
+            "newest_field": newest_field,
             "future_dated_samples": future_count,
         },
     )
 
 
+GRANULARITY_MIN_ROWS = 20
+"""Objects with fewer rows aren't scored on granularity (cardinality is meaningless on 1–2 rows)."""
+
+
 def _compute_granularity(fields: list[dict[str, Any]], sampled: int) -> QualityDimension:
     """Score granularity: penalize fields whose distinct-cardinality is too low or too high to be useful."""
     if not fields or sampled <= 0:
-        return QualityDimension(name="granularity", score=100.0, weight=0.10, details={})
+        return QualityDimension(name="granularity", score=100.0, weight=DIMENSION_WEIGHTS["granularity"], details={})
+    if sampled < GRANULARITY_MIN_ROWS:
+        # With a handful of rows every field looks constant or unique; not scored
+        # (weight 0 keeps it out of the DQI) instead of guessing.
+        return QualityDimension(
+            name="granularity", score=100.0, weight=0.0,
+            details={"not_scored": f"only {sampled} row(s); needs ≥{GRANULARITY_MIN_ROWS}"},
+        )
     scalar_fields = [
         f for f in fields
         if not ({"object", "array"} & set(f.get("types", {}).keys()))
     ]
     if not scalar_fields:
-        return QualityDimension(name="granularity", score=100.0, weight=0.10, details={"scalar_fields": 0})
+        return QualityDimension(name="granularity", score=100.0, weight=DIMENSION_WEIGHTS["granularity"], details={"scalar_fields": 0})
 
     ok = 0
     constant = 0
@@ -438,7 +508,7 @@ def _compute_granularity(fields: list[dict[str, Any]], sampled: int) -> QualityD
             constant += 1
             continue
         ratio = distinct / sampled
-        if ratio >= 0.99 and "id" not in f.get("path", "").lower():
+        if ratio >= 0.99 and not is_identifier_name(f.get("path", "")):
             # Non-ID field with near-unique values — may be noise (free text)
             near_unique += 1
             continue
@@ -449,7 +519,7 @@ def _compute_granularity(fields: list[dict[str, Any]], sampled: int) -> QualityD
     return QualityDimension(
         name="granularity",
         score=score,
-        weight=0.10,
+        weight=DIMENSION_WEIGHTS["granularity"],
         details={
             "scalar_fields": total,
             "healthy_cardinality": ok,
@@ -496,7 +566,7 @@ def compute_schema_quality(
             q_obj.extra_dimensions["accuracy"] = QualityDimension(
                 name="accuracy",
                 score=avg_conformance * 100,
-                weight=0.15,
+                weight=DIMENSION_WEIGHTS["accuracy"],
                 details={
                     "fields_with_pattern": len(rows),
                     "avg_pattern_conformance": round(avg_conformance, 3),

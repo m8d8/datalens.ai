@@ -17,6 +17,7 @@ secrets.yml
 .datalens/secrets.yaml
 .datalens/secrets.yml
 .datalens/.env
+.datalens/*.local.yaml
 .datalens/connections/        # Local connection configs (keep private)
 
 # Output and history (generated artifacts at runtime)
@@ -45,3 +46,6 @@ uv.lock
 # tmp
 tmp/
 tmp/**
+
+# Logs
+*.log

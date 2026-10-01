@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from datalens.profiling.coverage import coverage_pct
+
 logger = logging.getLogger(__name__)
 
 
@@ -523,8 +525,7 @@ class MetricsExporter:
             sampled = obj.get("sampled", 1) or 1
             for field in obj.get("fields", []):
                 field_path = field.get("path", "unknown")
-                presence = field.get("presence_count", 0)
-                coverage = (presence / sampled * 100) if sampled > 0 else 0
+                coverage = coverage_pct(field, sampled)  # true coverage: missing/null/empty excluded
                 
                 metrics.append(Metric(
                     name="field.coverage",

@@ -66,5 +66,10 @@ def _register_builtins() -> None:
     register_connector("mongodb", MongoDBConnector)
     register_connector("http", HTTPConnector)
 
+    # BigQuery imports google-cloud-bigquery only when connecting (optional extra).
+    from datalens.connectors.bigquery import BigQueryConnector
+
+    register_connector("bigquery", BigQueryConnector)
+
 
 _register_builtins()

@@ -1,0 +1,21 @@
+# Drift rules — most specific wins: field > object > defaults > built-ins.
+drift:
+  compare_to: previous            # previous | rolling | baseline:<tag>
+  min_rows: 20                    # objects smaller than this aren't judged on coverage/categories
+  defaults:                       # apply to every object and field
+    row_count: {drop_pct: {warn: 10, fail: 20}, increase_pct: {warn: 50}}
+    coverage:  {change_pct: 20}   # "report if 20% variance", either way
+    distribution: {psi_warn: 0.1, psi_fail: 0.25}
+    categories: {new: warn, vanished: info}
+    schema: {field_removed: fail, field_added: info, type_changed: fail}
+  objects:
+    deliveries:
+      row_count:
+        drop_pct: 10
+        drop_message: "Deliveries feed looks truncated: {old} → {new} rows ({delta_pct})"
+      fields:
+        match_id:       {coverage: {drop_pct: 5}}     # 5% drop in an id field is a breach
+        non_striker_id: {coverage: {drop_pts: {warn: 2, fail: 10}}}
+    "match*":                                          # wildcards work for objects and fields
+      fields:
+        "toss.*": {coverage: {drop_pts: 1}}

@@ -29,6 +29,8 @@ class ConnectionConfig:
     profiling: dict[str, Any] | None = None
     drift: dict[str, Any] | None = None
     history: dict[str, Any] | None = None
+    expected_schema: str | list[str] | None = None
+    """BYOS: expected JSON Schema file(s) for this source ("path.json" or "OBJECT=path.json")."""
 
     def __post_init__(self) -> None:
         if self.profiling is None:
@@ -164,6 +166,7 @@ class ConnectionLoader:
         profiling = data.get("profiling") or {}
         drift = data.get("drift") or {}
         history = data.get("history") or {}
+        expected_schema = data.get("expected_schema") or data.get("schema")
 
         if not name:
             raise ValueError(f"Connection config {path} missing 'name'")
@@ -188,6 +191,7 @@ class ConnectionLoader:
             profiling=profiling,
             drift=drift,
             history=history,
+            expected_schema=self._substitute_env_vars(expected_schema) if expected_schema else None,
         )
 
     def _substitute_env_vars(self, obj: Any) -> Any:

@@ -1,6 +1,6 @@
 # AI Providers Guide
 
-Configure AI to add narrative insights to your schema analysis reports. Choose between licensed providers (Claude Desktop, GitHub Copilot) or API-based providers (Anthropic, OpenAI).
+Configure AI to add narrative insights to your Datalens reports. Choose between licensed providers (Claude Desktop, GitHub Copilot) or API-based providers (Anthropic, OpenAI).
 
 ---
 
@@ -80,12 +80,12 @@ datalens analyze --cc my_api --ai claude
 
 ---
 
-### GitHub Copilot (License via gh CLI)
+### GitHub Copilot (License via the Copilot CLI)
 
-**What you need:**
-- GitHub CLI (`gh`) installed — [Install gh](https://cli.github.com/)
-- GitHub account and Copilot subscription active
-- Authenticated: `gh auth login`
+**What you need** (one of):
+- **Copilot CLI (preferred):** `npm i -g @github/copilot`, then run `copilot` once and log in.
+- **GitHub CLI fallback:** `gh` with `gh auth login` and the Copilot extension.
+- An active Copilot subscription either way.
 
 **Enable AI insights:**
 ```bash
@@ -93,24 +93,130 @@ datalens analyze --source file --path data.csv --ai copilot
 ```
 
 **How it works:**
-- Datalens invokes `gh copilot` with your analysis context
-- GitHub's Copilot service processes the request (typically uses GPT-4)
-- Your Copilot subscription covers the cost
-- No separate API keys needed
+- Datalens runs `copilot -p "<prompt>" -s --model auto --no-ask-user --no-custom-instructions`
+  (or `gh copilot -p` when only `gh` is installed).
+- The CLI runs in an empty temporary folder, so it can only answer: it can't read or change your files.
+- Your Copilot subscription covers the cost. No API keys needed.
+- Model: **auto** by default (Copilot picks). Set `--ai-model <id>` to choose one; `gh copilot` ignores it.
 
 **Verify it's available:**
 ```bash
-# Check GitHub authentication
-gh auth status
+copilot --version            # Copilot CLI
+# or, for the gh fallback:
+gh auth status && gh copilot status
+```
 
-# Check Copilot is available
-gh copilot status
-# Should show: Copilot service: OK
+**secrets.yaml (optional):**
+```yaml
+copilot:
+  cli_path: /opt/homebrew/bin/copilot   # if not on PATH
+  model: auto
+  timeout: 300
 ```
 
 **In connection configs:**
 ```bash
-# Same as Claude — just change the --ai flag
+datalens analyze --cc my_api --ai copilot
+```
+
+---
+
+### Anthropic API (Claude via API Key)
+
+**What you need:**
+- Anthropic API key — [Get one here](https://console.anthropic.com/account/keys)
+- `anthropic` Python library (included in `[ai]` extras)
+
+**Option 1: Environment variable (quickest)**
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+datalens analyze --source file --path data.csv --ai anthropic
+```
+
+**Option 2: Secrets file (persistent)**
+
+`.datalens/secrets.yaml`:
+```yaml
+anthropic:
+  api_key: "sk-ant-..."
+  model: "claude-opus-4-1"        # Optional: choose model
+  timeout: 60                      # Optional: API timeout in seconds
+```
+
+Then run:
+```bash
+datalens analyze --source file --path data.csv --ai anthropic
+# Datalens auto-loads secrets from .datalens/secrets.yaml
+```
+
+**Model selection:** the default is **auto** — for the Anthropic API that's the newest Sonnet model your key can
+use (falling back to `claude-sonnet-5-5`). Pin one only if you need to:
+
+```yaml
+# .datalens/secrets.yaml
+anthropic:
+  api_key: "sk-ant-..."
+  model: "claude-opus-5-5"      # optional; omit (or "auto") to let Datalens pick
+```
+
+| Model | Speed | Cost | Best for |
+|---|---|---|---|
+| `claude-opus-5-5` | Slower | Higher | Complex, wide schemas; subtle cross-object reasoning |
+| `claude-sonnet-5-5` | Balanced | Balanced | Default (what auto picks) |
+| `claude-haiku-4-5-20251001` | Fastest | Lower | Quick, cost-conscious reviews |
+
+**In connection configs:**
+```yaml
+# .datalens/connections/my_api.yaml
+name: my_api
+source_type: http
+params:
+  uri: "https://api.example.com/v1"
+```
+
+```bash
+# Use with Claude insights
+datalens analyze --cc my_api --ai claude
+```
+
+---
+
+### GitHub Copilot (License via the Copilot CLI)
+
+**What you need** (one of):
+- **Copilot CLI (preferred):** `npm i -g @github/copilot`, then run `copilot` once and log in.
+- **GitHub CLI fallback:** `gh` with `gh auth login` and the Copilot extension.
+- An active Copilot subscription either way.
+
+**Enable AI insights:**
+```bash
+datalens analyze --source file --path data.csv --ai copilot
+```
+
+**How it works:**
+- Datalens runs `copilot -p "<prompt>" -s --model auto --no-ask-user --no-custom-instructions`
+  (or `gh copilot -p` when only `gh` is installed).
+- The CLI runs in an empty temporary folder, so it can only answer: it can't read or change your files.
+- Your Copilot subscription covers the cost. No API keys needed.
+- Model: **auto** by default (Copilot picks). Set `--ai-model <id>` to choose one; `gh copilot` ignores it.
+
+**Verify it's available:**
+```bash
+copilot --version            # Copilot CLI
+# or, for the gh fallback:
+gh auth status && gh copilot status
+```
+
+**secrets.yaml (optional):**
+```yaml
+copilot:
+  cli_path: /opt/homebrew/bin/copilot   # if not on PATH
+  model: auto
+  timeout: 300
+```
+
+**In connection configs:**
+```bash
 datalens analyze --cc my_api --ai copilot
 ```
 
@@ -207,6 +313,22 @@ datalens analyze --source file --path data.csv --ai cursor
 
 ---
 
+## Choosing a model (default: auto)
+
+Every provider defaults to **auto**, and the report shows the model that was used.
+
+- **Claude / Cursor / Copilot CLIs:** `--model auto` (or no flag), so each CLI uses your account's default.
+- **Anthropic API:** the newest Sonnet model the key can use.
+- **OpenAI API:** its default chat model.
+
+Set a model with `--ai-model <id>`, `ai_model: <id>` in the app config, or a provider's `model:` in secrets.yaml.
+Precedence: CLI/app config → provider secret → `DATALENS_<PROVIDER>_MODEL` env var → auto.
+
+**Wrong model?** If the provider rejects the configured model (unknown, unavailable, no access), Datalens logs a
+warning, retries the same request on **auto**, and says so in the run warnings and at the top of the AI Review tab
+("Configured model 'x' was rejected … switched to auto"). The run never fails because of a model name.
+The standalone `copilot` CLI accepts `--model`; `gh copilot` doesn't, so a configured model is noted and ignored there.
+
 ## Auto-detect (Recommended)
 
 Let Datalens find the best available provider:
@@ -236,7 +358,7 @@ datalens analyze --source file --path sales.csv --ai claude
 ```
 
 **Output includes:**
-- `sales-datalens-report.html` (with AI Insights tab)
+- `sales-datalens-report.html` (with the Verdict → AI Review tab)
 - `sales-datalens-ai-insights.md` (insights as markdown)
 
 ### Example 2: Team using Anthropic API with model choice
@@ -309,6 +431,10 @@ claude --version
 ### "GitHub Copilot not available"
 
 ```bash
+# Copilot CLI installed and logged in?
+copilot --version            # install: npm i -g @github/copilot, then run `copilot` to log in
+
+# Or the gh fallback:
 # Check GitHub CLI is installed and authenticated
 gh auth status
 

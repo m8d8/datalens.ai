@@ -99,7 +99,7 @@ What sensitive data exists and how exposed you are.
 
 The workhorse tab: every field, fully searchable and sortable.
 
-Columns: object, field path, coverage %, null/empty %, type distribution (multi-type badge), distinct count, cardinality, example values, and a PII badge where relevant.
+Columns: object, field path, **coverage %** (true coverage: missing, null and empty values all count against it — the same number as the Coverage heat map and drift tables), null/empty % (rows where the key exists but holds nothing), type distribution (multi-type badge), distinct count, cardinality, example values, and a PII badge where relevant.
 
 - **Object filter** — narrow to one or more collections/tables.
 - **Distinct modal** — click a distinct count to see the value distribution.
@@ -111,7 +111,7 @@ Columns: object, field path, coverage %, null/empty %, type distribution (multi-
 
 ## Tab 6 — Coverage 🔬
 
-A field × object **heat map** colored by coverage % (green 90%+ → red 0–25%).
+A field × object **heat map** of true coverage % in five soft bands (90–100 · 75–90 · 50–75 · 25–50 · 0–25), the same bands as the Field Explorer.
 
 **How to use it:** spot at a glance which fields are universally present (good join/identity candidates) and which are object-specific or sparse. A column of red usually means an optional or broken upstream field.
 
@@ -173,21 +173,66 @@ Join and key intelligence across objects (this tab also covers the former Cross-
 
 ---
 
+## Report layout
+
+| Chapter | Tabs | Business view |
+|---|---|---|
+| **Verdict** — state and what to do | Overview · Action Plan · AI Review · How scores work | all |
+| **Health** — can I trust it | Data Quality · Trends & Drift · Expected Schema · PII Detection · Type Warnings | all but Type Warnings |
+| **Shape** — what's in it | Insights · Coverage | Insights |
+| **Structure** — how it connects | Field Explorer · Relationships · Cross-Object | hidden |
+| **Fingerprint** — value-level detail | Distributions · Patterns | hidden |
+
+Switch views with **Business / Technical** in the header; the Business view keeps the decision-level tabs only.
+
+## Verdict → AI Review 👥
+
+Shown with `--ai`. Sections (Recommendations, Quality assessment, Key & domain fields, …) start **collapsed**, each
+with its finding count, severity counts and the first titles as a preview; **Expand all** opens every section,
+**Collapse all** closes everything. Inside, the review is shown as scannable finding cards: a title, a one-line gist, key numbers as
+coloured chips and fields as chips, with the full reasoning under **Details** (Expand all / Collapse all at the
+top). Recommendations are sorted by severity and also merged into the Action Plan (source: AI). The banner shows
+the provider and the model used (`auto` unless configured).
+
+## Verdict → Action Plan 👥
+
+Every finding of the run turned into one action, highest priority first. Each card has:
+**evidence** (the numbers and the rule that fired), **why it matters**, the affected fields, a **copy-ready
+fix** (SQL / config), a severity, an effort estimate and its **source** (Drift, Expected schema, Privacy,
+Integrity, Quality, AI, Chat). Related findings are merged (a rename explains "required field missing"; five
+`season`-like fields with the same int/string mix become one fix). Filter by severity or source, tick items done
+(kept in your browser), and export the plan as CSV, Markdown or JSON.
+
+Priority = severity (high 3 · medium 2 · low 1) × 10 + breadth (share of rows/fields affected, 0–10).
+
+## Verdict → How scores work 👥
+
+This run's health score step by step (DQI − each penalty), the DQI of every object and dimension with its weight
+(dimensions that couldn't be scored show `n/a` and why), and the full glossary. Every ⓘ in the report shows the
+short version on hover. The same text is in [METRICS.md](METRICS.md) and `datalens glossary <term>`.
+
+## Health → Expected Schema 👥
+
+Shown when you pass `--schema`. Conformance % per object, and every check (required, type, format, enum, range,
+pattern, undeclared fields) with expected vs observed.
+
 ## Tab 12 — Trends & Drift 👥
 
-What changed since a previous run (requires `--detect-drift` or `--compare-to`; see [Usage Guide](USAGE.md#schema-drift--history)).
+What changed versus the reference run — the previous run, a fixed baseline, or the learned rolling range
+(see [Usage → Drift & history](USAGE.md#drift--history)).
 
-- **Drift severity** — none / low / medium / high (high = breaking changes like removed fields or type changes).
-- **New / Removed Objects**.
-- **New / Removed Fields** — shown as **Field-Explorer-style tables** with coverage, types, distinct count, sample values, and an inline value distribution. Added fields are sourced from the current run; removed fields from the previous run (so you can still see what the removed data looked like).
-- **Type Changes** — was → now, with **before/after value distributions** side by side.
-- **Coverage Shifts** — was → now with the point delta (▲/▼), plus **before/after distributions**.
-- **Cardinality Changes**.
-- **Object filter** — one dropdown filters every drift table by object/collection.
-- **Export Drift CSV** — download all drift changes (respecting the object filter) as a single CSV with a *Change Type* column — ready to hand to a content producer or upstream owner.
-- **Empty state** — on a first run, it explains that this run becomes your baseline.
+- **Drift report** — breaches, warnings and info with a filter. Each finding says *where* (object.field), *what
+  changed* in plain language with the numbers, and the **rule that fired**: its threshold, its scope (field /
+  object / dataset / built-in / learned band) and, for the rolling baseline, the band and how many runs it was
+  learned from. Notes explain anything skipped (e.g. objects too small to judge).
+- **Timeline** — health, DQI and each object's row count across saved runs (sparkline, earlier range, this run),
+  plus **Δ 1 day / Δ 7 days / Δ 1 month** columns: the change versus the newest run at least that long before this
+  one (by `--run-date`). Only windows your history covers are shown; hover a cell for the run and value compared.
+- **Field-level detail** — new/removed fields as Field-Explorer tables, type changes and coverage shifts with
+  before/after value distributions, an object filter and **Export Drift CSV**.
 
-**How to use it:** make this part of monitoring. A removed field or a type change is a breaking change for consumers; a coverage drop often signals an upstream pipeline problem. Filter to the affected collection, eyeball the before/after distributions to see *how* values changed, then **Export Drift CSV** to share the exact changes with whoever owns the feed. The drift severity also feeds the Overview health verdict.
+**How to use it:** read the breaches top-down — structural and volume changes come first, derived scores last.
+The same findings are in `*-datalens-drift-report.json` and in the Action Plan with fixes.
 
 ---
 
@@ -208,16 +253,22 @@ What changed since a previous run (requires `--detect-drift` or `--compare-to`; 
 2. Keep masking on; confirm the Compliance risk is acceptable.
 
 **Ongoing monitoring**
-1. Schedule runs with `--detect-drift`.
-2. Watch Trends & Drift; alert on `high` severity.
+1. Schedule runs with `--compare-to rolling --fail-on fail` (see [CI/CD](USAGE.md#cicd--gates-exit-codes-notifications)).
+2. Watch Trends & Drift; work the Action Plan; `datalens serve` to investigate.
 
 ---
 
 ## How the scores are computed
 
-- **DQI** is a weighted average of per-dimension scores (completeness, consistency, uniqueness, validity, timeliness, granularity, accuracy), averaged across objects. See the Data Quality tab for per-object weights and details.
-- **Health verdict** starts from the overall DQI, then subtracts penalties for high-risk PII, schema drift, and mixed-type fields. Breaking drift caps the verdict below "Healthy". Drivers are listed in the banner so the number is never a black box.
-- **Compliance exposure** is *ratio-based*: the share of fields that are sensitive, weighted by category sensitivity (gov-ID/payment > contact info > name) — so it's fair across dataset sizes.
-- **Fitness-for-Use** combines DQI, completeness, type consistency, PII presence, and drift into per-object readiness badges.
+Every score is deterministic and explained in the report itself (hover ⓘ, or **Verdict → How scores work**) and
+in [METRICS.md](METRICS.md), which is generated from the same constants the code uses:
 
-All scores are deterministic and computed without AI; enabling an AI provider only adds labeled narrative on top.
+- **DQI** — weighted mean of completeness (0.30), consistency (0.25), uniqueness (0.20), validity (0.25),
+  timeliness (0.10), granularity (0.10) and accuracy (0.15), over the dimensions that could be scored, per object;
+  the overall DQI is the mean over objects.
+- **Health** — DQI minus penalties for high-risk PII, drift, expected-schema failures and mixed types; a breach
+  caps the status at "attention".
+- **Compliance exposure** — share of sensitivity-weighted PII fields, with a floor for confirmed direct identifiers.
+- **Fitness-for-Use** — per-object readiness gates on DQI, completeness, consistency, PII and drift.
+
+Enabling AI never changes a score; it only adds labelled recommendations.

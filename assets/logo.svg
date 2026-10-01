@@ -84,11 +84,7 @@
   <circle cx="205" cy="85" r="2.5" fill="white"/>
 
   <!-- ── WORDMARK ───────────────────────────────────────────────────────── -->
-  <text x="228" y="76" font-size="40" font-weight="800" letter-spacing="-1.5">
+  <text x="228" y="99" font-size="40" font-weight="800" letter-spacing="-1.5">
     <tspan fill="#0ea5e9">Data</tspan><tspan fill="#1e293b">lens</tspan>
   </text>
-  <text x="230" y="104" font-size="13.5" font-weight="500" fill="#64748b" letter-spacing="3.5">SCHEMA ANALYSIS</text>
-
-  <!-- ── TAGLINE SEPARATOR ─────────────────────────────────────────────── -->
-  <line x1="230" y1="112" x2="498" y2="112" stroke="#e2e8f0" stroke-width="1"/>
 </svg>

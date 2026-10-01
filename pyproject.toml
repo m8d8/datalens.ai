@@ -1,7 +1,7 @@
 [project]
 name = "datalens-ai"
-version = "0.0.1"
-description = "Advanced schema analysis and data profiling tool for data analysts and engineers"
+version = "0.2.0"
+description = "Data health intelligence: profiling, quality scores, learned drift baselines, expected-schema checks and an action plan for any data source"
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -45,6 +45,9 @@ cloud = [
     "httpx>=0.27.0",      # HTTP connector + webhooks
     "paramiko>=3.4.0",    # SFTP connector
 ]
+bigquery = [
+    "google-cloud-bigquery>=3.11.0",   # BigQuery connector
+]
 alerts = [
     "httpx>=0.27.0",      # Slack, webhooks, PagerDuty
 ]
@@ -55,6 +58,7 @@ metrics = [
 all = [
     "anthropic>=0.25.0",
     "openai>=1.30.0",
+    "google-cloud-bigquery>=3.11.0",
     "boto3>=1.34.0",
     "httpx>=0.27.0",
     "paramiko>=3.4.0",
@@ -70,10 +74,10 @@ dev = [
 datalens = "datalens.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/datalens-ai/datalens"
-Documentation = "https://github.com/datalens-ai/datalens#readme"
-Repository = "https://github.com/datalens-ai/datalens"
-Issues = "https://github.com/datalens-ai/datalens/issues"
+Homepage = "https://github.com/m8d8/datalens.ai"
+Documentation = "https://github.com/m8d8/datalens.ai#readme"
+Repository = "https://github.com/m8d8/datalens.ai"
+Issues = "https://github.com/m8d8/datalens.ai/issues"
 
 [build-system]
 requires = ["hatchling"]
