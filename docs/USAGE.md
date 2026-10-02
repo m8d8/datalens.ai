@@ -73,7 +73,7 @@ Each analysis creates a timestamped subdirectory under `--out-dir` (default: `ou
 - **Direct MongoDB**: Uses database name → `analytics_0611_040438/`
 - **Direct S3**: Uses bucket/prefix → `bucket_prefix_0611_040438/`
 
-For details on creating and managing connection configs, see [Connection Config Guide](CONNECTION_CONFIG.md).
+For details on creating and managing connection configs, see [Setup Guide](SETUP.md) and [Setup Connections](CONNECTION_CONFIG.md).
 
 ---
 

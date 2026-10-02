@@ -2,9 +2,9 @@
 Connection configuration loading and management.
 
 Supports loading connection configs from:
-- Full file paths
-- .datalens/connections/ (project-local, checked first)
-- ~/.datalens/connections/ (user-global, fallback)
+- File paths (--cc path/to/name.yaml)
+- <config dir>/connections/<name>.yaml, where the config dir is --config-dir / $DATALENS_CONFIG_DIR
+  if set, else .datalens/ (project-local) then ~/.datalens/ (user-global). See ``datalens.config.home``.
 
 Environment variable substitution: ${VAR_NAME} syntax.
 """
@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from datalens.config.home import config_dirs
 
 
 @dataclass
@@ -59,9 +61,9 @@ class ConnectionLoader:
         Load a connection config.
 
         Lookup order:
-        1. If name_or_path contains '/', treat as full path
-        2. Check .datalens/connections/{name}.yaml (project-local)
-        3. Check ~/.datalens/connections/{name}.yaml (user-global)
+        1. If name_or_path contains '/' (or ends in .yaml/.yml), treat as a file path
+        2. <config dir>/connections/{name}.yaml, where the config dir is --config-dir /
+           $DATALENS_CONFIG_DIR if set, else .datalens/ then ~/.datalens/
 
         Args:
             name_or_path: Connection name or full file path.
@@ -76,7 +78,7 @@ class ConnectionLoader:
         if name_or_path in self._cache:
             return self._cache[name_or_path]
 
-        is_full_path = "/" in name_or_path or "\\" in name_or_path
+        is_full_path = self._is_path(name_or_path)
         path = self._resolve_config_path(name_or_path)
         if not path:
             self._raise_connection_not_found(name_or_path)
@@ -93,51 +95,41 @@ class ConnectionLoader:
         Returns:
             List of (name, source_type) tuples.
         """
-        connections = []
-
-        # Check project-local
-        project_dir = self.project_root / ".datalens" / "connections"
-        if project_dir.exists():
-            for file in project_dir.glob("*.yaml"):
+        connections: list[tuple[str, str]] = []
+        for folder in config_dirs(self.project_root):
+            conn_dir = folder / "connections"
+            if not conn_dir.is_dir():
+                continue
+            for file in sorted(conn_dir.glob("*.yaml")):
                 if file.is_file() and not file.name.startswith("_"):
+                    # read name/type only: listing must not need ${VAR}s to be set
                     try:
-                        config = self._load_connection_file(file)
-                        connections.append((config.name, config.source_type))
-                    except Exception:
-                        pass
+                        import yaml
 
-        # Check user-global
-        user_dir = Path.home() / ".datalens" / "connections"
-        if user_dir.exists():
-            for file in user_dir.glob("*.yaml"):
-                if file.is_file() and not file.name.startswith("_"):
-                    try:
-                        config = self._load_connection_file(file)
-                        # Skip if already found in project-local
-                        if not any(c[0] == config.name for c in connections):
-                            connections.append((config.name, config.source_type))
+                        data = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
                     except Exception:
-                        pass
+                        continue
+                    name, source_type = data.get("name"), data.get("source_type") or data.get("type")
+                    # a name found in a higher-priority folder wins
+                    if name and source_type and not any(c[0] == name for c in connections):
+                        connections.append((name, source_type))
 
         return sorted(connections)
 
+    @staticmethod
+    def _is_path(name_or_path: str) -> bool:
+        return ("/" in name_or_path or "\\" in name_or_path
+                or name_or_path.endswith((".yaml", ".yml")))
+
     def _resolve_config_path(self, name_or_path: str) -> Path | None:
-        """Resolve config path from name or full path."""
-        # If it contains /, treat as full path
-        if "/" in name_or_path or "\\" in name_or_path:
-            path = Path(name_or_path)
+        """Resolve config path from name or file path."""
+        if self._is_path(name_or_path):
+            path = Path(name_or_path).expanduser()
             return path if path.exists() else None
-
-        # Try project-local
-        project_path = self.project_root / ".datalens" / "connections" / f"{name_or_path}.yaml"
-        if project_path.exists():
-            return project_path
-
-        # Try user-global
-        user_path = Path.home() / ".datalens" / "connections" / f"{name_or_path}.yaml"
-        if user_path.exists():
-            return user_path
-
+        for folder in config_dirs(self.project_root):
+            path = folder / "connections" / f"{name_or_path}.yaml"
+            if path.exists():
+                return path
         return None
 
     def _load_connection_file(self, path: Path, strict_filename_check: bool = True) -> ConnectionConfig:
@@ -212,10 +204,12 @@ class ConnectionLoader:
             var_name = match.group(1)
             value = os.environ.get(var_name)
             if value is None:
-                # Check .env file in project root (optional)
-                env_file = self.project_root / ".env"
-                if env_file.exists():
-                    value = self._load_env_file_var(env_file, var_name)
+                # Check .env files (optional): the config folder(s), then the project root
+                for env_file in [d / ".env" for d in config_dirs(self.project_root)] + [self.project_root / ".env"]:
+                    if env_file.exists():
+                        value = self._load_env_file_var(env_file, var_name)
+                        if value is not None:
+                            break
                 if value is None:
                     raise ValueError(
                         f"Environment variable '{var_name}' not found. "
@@ -243,13 +237,12 @@ class ConnectionLoader:
 
     def _raise_connection_not_found(self, name_or_path: str) -> None:
         """Raise helpful error for missing connection."""
-        project_path = self.project_root / ".datalens" / "connections" / f"{name_or_path}.yaml"
-        user_path = Path.home() / ".datalens" / "connections" / f"{name_or_path}.yaml"
-
-        msg = f"Connection config '{name_or_path}' not found.\n"
-        msg += f"Create it at:\n"
-        msg += f"  - {project_path} (project-local), or\n"
-        msg += f"  - {user_path} (user-global)\n"
-        msg += f"\nOr pass a full file path with --cc /path/to/config.yaml"
-
-        raise FileNotFoundError(msg)
+        if self._is_path(name_or_path):
+            raise FileNotFoundError(f"Connection config file not found: {name_or_path}")
+        searched = "\n".join(f"  - {d / 'connections' / (name_or_path + '.yaml')}"
+                              for d in config_dirs(self.project_root))
+        raise FileNotFoundError(
+            f"Connection config '{name_or_path}' not found. Looked in:\n{searched}\n\n"
+            f"Create it with:  datalens connection-new {name_or_path} --source file --path <data>\n"
+            f"Or pass a file path: --cc /path/to/{name_or_path}.yaml   ·   Folder in use: datalens config-show"
+        )

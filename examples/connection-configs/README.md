@@ -315,4 +315,4 @@ datalens analyze --cc my_api --debug
 4. Run `datalens connection-list` to verify
 5. Analyze: `datalens analyze --cc your_connection_name`
 
-For more details, see the [Connection Config Guide](../../docs/CONNECTION_CONFIG.md)
+For more details, see [Setup Connections](../../docs/CONNECTION_CONFIG.md) and the [Setup Guide](../../docs/SETUP.md)

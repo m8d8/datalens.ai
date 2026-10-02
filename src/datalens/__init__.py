@@ -11,7 +11,7 @@ Includes alerting via Slack/Email/Webhooks and metrics export to StatsD/Promethe
 CLI-first design; AI insights are optional and only activate when configured.
 """
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 __author__ = "Datalens Contributors"
 
 from datalens.core import analyze

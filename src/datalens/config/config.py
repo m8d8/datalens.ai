@@ -202,9 +202,10 @@ def load_config(
     Precedence (lowest to highest):
     1. Defaults (Config dataclass defaults)
     2. Environment variables (DATALENS_* env vars)
-    3. Auto-discovered global config: .datalens/config.yaml or ~/.datalens/config.yaml
-    4. Auto-discovered env-swimlane overlay: .datalens/config-{env}.yaml or
-       ~/.datalens/config-{env}.yaml (env = ``env`` arg, else DATALENS_ENV)
+    3. Config folder: config.yaml in --config-dir / $DATALENS_CONFIG_DIR, else
+       .datalens/ then ~/.datalens/ (see ``datalens.config.home``)
+    4. Env-swimlane overlay from the same folder: config-{env}.yaml
+       (env = ``env`` arg, else DATALENS_ENV)
     5. Explicit --config file (YAML)
     6. CLI overrides (from --flags)
 
@@ -277,46 +278,26 @@ def load_config(
 
 def _load_global_config_defaults(env: str | None = None) -> dict[str, Any]:
     """
-    Search for the global app config file in standard locations (in order):
-    1. .datalens/config[-{env}].yaml (project-local)
-    2. ~/.datalens/config[-{env}].yaml (user-global)
-
-    Mirrors _load_secrets_from_defaults(). Returns {} if none exist. This is
-    what powers env-swimlane config (dev/staging/prod), e.g. config-prod.yaml.
+    The app config from the config folder: ``config[-{env}].yaml`` in --config-dir /
+    DATALENS_CONFIG_DIR if set, else ./.datalens/ then ~/.datalens/ (see ``datalens.config.home``).
+    Returns {} if none exist. This is what powers env-swimlane config, e.g. config-prod.yaml.
     """
+    from datalens.config.home import find_config_file
+
     suffix = f"-{env}" if env else ""
-    search_paths = [
-        Path(f".datalens/config{suffix}.yaml"),
-        Path.home() / ".datalens" / f"config{suffix}.yaml",
-    ]
-
-    for path in search_paths:
-        if path.exists():
-            return _load_yaml(path)
-
-    return {}
-
-
+    path = find_config_file(f"config{suffix}.yaml")
+    return _load_yaml(path) if path else {}
 
 
 def _load_secrets_from_defaults() -> dict[str, Any]:
     """
-    Search for secrets file in standard locations (in order):
-    1. .datalens/secrets.yaml (project-local)
-    2. ~/.datalens/secrets.yaml (user-global)
-
-    Returns first found, or empty dict if none exist.
+    ``secrets.yaml`` from the config folder: --config-dir / DATALENS_CONFIG_DIR if set, else
+    ./.datalens/ then ~/.datalens/. Returns the first found, or {} if none exist.
     """
-    search_paths = [
-        Path(".datalens/secrets.yaml"),
-        Path.home() / ".datalens" / "secrets.yaml",
-    ]
+    from datalens.config.home import find_config_file
 
-    for path in search_paths:
-        if path.exists():
-            return _load_yaml(path)
-
-    return {}
+    path = find_config_file("secrets.yaml")
+    return _load_yaml(path) if path else {}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

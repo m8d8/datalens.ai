@@ -1,28 +1,30 @@
-# Connection Config System - Datalens
+# Setup Connections
 
-Store, reuse, and manage data source credentials with the connection config system. No more repeating credentials on the command line!
+[Setup Guide](SETUP.md) › **Setup Connections**
+
+A connection is one YAML file per data source, kept in the `connections/` folder of your
+[config folder](SETUP.md#3-the-config-folder). Name it once, then run `datalens analyze --cc <name>`, with no
+credentials on the command line.
 
 ## Quick Start
 
 ```bash
-# 1. Create a connection config
-mkdir -p .datalens/connections
-cat > .datalens/connections/my_api.yaml << 'EOF'
-name: my_api
-source_type: http
-params:
-  uri: "https://api.example.com/v1/data"
-  auth_type: bearer
-  auth_token: "${API_TOKEN}"
-EOF
+# 1. Create a config folder (once). Default: ~/.datalens. Or any path: datalens init /etc/datalens
+datalens init
 
-# 2. Set environment variable
-export API_TOKEN=sk-abc123...
+# 2. Write a connection from a template: file | mongodb | http | s3 | bigquery
+datalens connection-new my_api --source http --uri https://api.example.com/v1/data
 
-# 3. Analyze using the connection
-datalens analyze --cc my_api
-# Output: output/my_api_0611_040438/
+# 3. If the API needs a token: uncomment auth_type / auth_token: "${API_TOKEN}" in connections/my_api.yaml,
+#    then put the value in the config folder's .env (or export API_TOKEN=...)
+echo 'API_TOKEN=...' >> ~/.datalens/.env
+
+# 4. Analyze
+datalens analyze --cc my_api            # output/my_api_<tag>/
 ```
+
+`datalens connection-list` shows every connection that's available, and `datalens config-show` shows which config
+folder is in use.
 
 ---
 
@@ -67,6 +69,9 @@ Datalens supports both **quick one-off analysis** and **reusable connection conf
 ---
 
 ## Directory Structure
+
+The layout below uses the default folders. Any folder passed with `--config-dir` has the same layout
+(see [the config folder](SETUP.md#3-the-config-folder)).
 
 ```
 .datalens/
@@ -210,20 +215,18 @@ params:
 
 ## Connection Lookup Resolution
 
-When you use `datalens analyze --cc my_api`, the system looks for the config in this order:
+When you run `datalens analyze --cc my_api`, Datalens looks for the connection in this order:
 
-1. **Full Path** (if `my_api` contains `/`)
-   - `/custom/path/to/config.yaml` → Load directly
-   
-2. **Project-Local** (first location checked)
-   - `.datalens/connections/my_api.yaml` → Found! Use this
-   
-3. **User-Global** (fallback)
-   - `~/.datalens/connections/my_api.yaml` → Found! Use this
-   
-4. **Not Found** → Error with helpful hints
+1. **A file path.** If the value contains `/` or ends in `.yaml`/`.yml`, that file is loaded directly, from
+   anywhere: `--cc /etc/datalens/connections/my_api.yaml` or `--cc my_api.yaml`.
+2. **`--config-dir` / `DATALENS_CONFIG_DIR`.** If set, only `<that folder>/connections/my_api.yaml` is
+   checked. Nothing else is read, so a project's own `.datalens/` can't be picked up by accident.
+3. **Default folders.** Otherwise `./.datalens/connections/my_api.yaml` (project), then
+   `~/.datalens/connections/my_api.yaml` (personal).
+4. **Not found:** the error lists every path it tried and the `connection-new` command to create it.
 
-**Best Practice:** Store shared team configs in `.datalens/connections/` (project) and personal credentials in `~/.datalens/connections/` (global).
+**Best practice:** share team connections in a project or shared folder (no secrets in them), keep personal
+credentials in `~/.datalens/.env` or `secrets.yaml`, and use `--config-dir` on servers and in CI.
 
 ---
 
@@ -338,7 +341,7 @@ params:
 EOF
 
 # Set credentials
-export MONGO_URI="mongodb+srv://admin:SecureP@ss123@prod-cluster.mongodb.net"
+export MONGO_URI="mongodb+srv://<user>:<password>@prod-cluster.mongodb.net"
 
 # Analyze
 datalens analyze --cc prod_db
@@ -679,7 +682,4 @@ A: Yes! Configs are YAML files. Keep in git, but never commit `.env` with actual
 ## See Also
 
 - [Example Connection Configs](../examples/connection-configs/README.md) — Ready-to-use examples for all source types
-- [Connection Config Architecture](../.claude/projects/-Users-mmehrotra-Documents-code-co-de-etl-utils-agentic-datalens-ai/memory/connection_config_design.md) — Technical design
-- [Output Organization](../.claude/projects/-Users-mmehrotra-Documents-code-co-de-etl-utils-agentic-datalens-ai/memory/output_organization.md) — Directory naming & structure
-- [HTTP Download Strategy](../.claude/projects/-Users-mmehrotra-Documents-code-co-de-etl-utils-agentic-datalens-ai/memory/http_download_strategy.md) — Auto-download & format detection
 

@@ -27,6 +27,7 @@ Examples:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -143,8 +144,31 @@ def _get_output_subdir_name(
     return f"{base_name}_{timestamp_short}"
 
 
+def _set_config_dir(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+    """--config-dir: make every config/secrets/connection lookup use only this folder."""
+    from datalens.config.home import ENV_VAR
+
+    if value:
+        os.environ[ENV_VAR] = str(Path(value).expanduser().resolve())
+    return value
+
+
+def config_dir_option(f):
+    return click.option(
+        "--config-dir",
+        type=click.Path(file_okay=False),
+        envvar="DATALENS_CONFIG_DIR",
+        expose_value=False,
+        is_eager=True,
+        callback=_set_config_dir,
+        help="Config folder to use instead of ./.datalens and ~/.datalens "
+             "(config.yaml, secrets.yaml, .env, connections/). Env: DATALENS_CONFIG_DIR.",
+    )(f)
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="datalens")
+@config_dir_option
 def cli() -> None:
     """
     Datalens — Data Health Intelligence
@@ -156,6 +180,7 @@ def cli() -> None:
 
 
 @cli.command()
+@config_dir_option
 @click.option(
     "--source",
     "-s",
@@ -275,8 +300,8 @@ def cli() -> None:
     "--out-dir",
     "-o",
     type=click.Path(),
-    default="output",
-    help="Output directory (default: output)",
+    default=None,
+    help="Output directory (default: out_dir in the config folder's config.yaml, else 'output')",
 )
 @click.option(
     "--version-tag",
@@ -591,12 +616,14 @@ def analyze_cmd(
         # connection_config can be: "my_api" or "/path/to/config.yaml"
         connection_config_name = None
         if connection_config:
-            if "/" in connection_config or "\\" in connection_config:
+            if "/" in connection_config or "\\" in connection_config or connection_config.endswith((".yaml", ".yml")):
                 # It's a file path - extract filename without extension
                 connection_config_name = Path(connection_config).stem
             else:
                 # It's just a name
                 connection_config_name = connection_config
+
+        out_dir = _resolve_out_dir(out_dir, config_file, env)
 
         # Create structured output subdirectory
         subdir_name = _get_output_subdir_name(
@@ -1143,7 +1170,15 @@ def _merge_connection_config(
 # ─── CI-friendly commands: history, drift, scores, schema ───────────────────
 
 
-def _history_store(history_dir: str | None, out_dir: str):
+def _resolve_out_dir(out_dir: str | None, config_file: str | None = None, env: str | None = None) -> str:
+    """--out-dir if given, else out_dir from the config folder / -c file, else 'output'."""
+    if out_dir:
+        return out_dir
+    return str(load_config(config_file=config_file, env=env).out_dir or "output")
+
+
+def _history_store(history_dir: str | None, out_dir: str | None):
+    out_dir = _resolve_out_dir(out_dir)
     from datalens.history.store import HistoryStore
 
     return HistoryStore(Path(history_dir) if history_dir else Path(out_dir) / ".history")
@@ -1155,7 +1190,8 @@ def history() -> None:
 
 
 @history.command("list")
-@click.option("--out-dir", "-o", default="output", help="Output directory whose .history to read.")
+@config_dir_option
+@click.option("--out-dir", "-o", default=None, help="Output directory whose .history to read (default: config out_dir, else output).")
 @click.option("--history-dir", default=None, help="History directory (default: <out-dir>/.history).")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
 def history_list(out_dir: str, history_dir: str | None, output_format: str) -> None:
@@ -1177,10 +1213,11 @@ def history_list(out_dir: str, history_dir: str | None, output_format: str) -> N
 
 
 @cli.command("drift")
+@config_dir_option
 @click.option("--run", "run_tag", default=None, help="Run to evaluate (default: the latest saved run).")
 @click.option("--compare-to", default="previous",
               help="'previous', 'rolling', 'baseline:<tag>' or '<tag>' (default: previous).")
-@click.option("--out-dir", "-o", default="output", help="Output directory whose .history to read.")
+@click.option("--out-dir", "-o", default=None, help="Output directory whose .history to read (default: config out_dir, else output).")
 @click.option("--history-dir", default=None, help="History directory (default: <out-dir>/.history).")
 @click.option("--drift-rules", type=click.Path(exists=True), default=None, help="YAML drift rules.")
 @click.option("--config", "-c", "config_file", type=click.Path(exists=True), help="App config (YAML).")
@@ -1241,6 +1278,7 @@ def drift_cmd(run_tag, compare_to, out_dir, history_dir, drift_rules, config_fil
 
 
 @cli.command("scores")
+@config_dir_option
 @click.argument("run", type=click.Path(exists=True))
 @click.option("--min-score", default=None, help="Score floors, e.g. 'health=70,dqi=80'.")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
@@ -1380,6 +1418,7 @@ def _chat_provider(ai: str, ai_model: str | None = None):
 
 
 @cli.command("serve")
+@config_dir_option
 @click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
 @click.option("--ai", default="auto", type=_AI_CHOICES, help="AI provider for chat (default: auto-detect).")
 @click.option("--ai-model", default=None, help="Model for --ai (default: auto). A rejected model falls back to auto.")
@@ -1417,6 +1456,7 @@ def serve_cmd(run_dir: str, ai: str, ai_model: str | None, port: int, sample_siz
 
 
 @cli.command("ask")
+@config_dir_option
 @click.argument("question")
 @click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
 @click.option("--ai", default="auto", type=_AI_CHOICES, help="AI provider (default: auto-detect).")
@@ -1467,6 +1507,7 @@ def info() -> None:
 
 
 @cli.command("connection-list")
+@config_dir_option
 @click.option(
     "--verbose",
     "-v",
@@ -1479,10 +1520,13 @@ def connection_list_cmd(verbose: bool) -> None:
     connections = loader.list_connections()
 
     if not connections:
+        from datalens.config.home import config_dirs
+
+        folders = "\n".join(f"  {d / 'connections'}" for d in config_dirs())
         console.print(
-            "[yellow]No connection configs found.[/yellow]\n"
-            "Create one at: [cyan].datalens/connections/{name}.yaml[/cyan]\n"
-            "Or: [cyan]~/.datalens/connections/{name}.yaml[/cyan] (global)"
+            f"[yellow]No connection configs found.[/yellow] Looked in:\n{folders}\n\n"
+            "Create one:  [cyan]datalens connection-new my_files --source file --path ./data[/cyan]\n"
+            "New setup:   [cyan]datalens init[/cyan]  (writes ~/.datalens, or the --config-dir folder)"
         )
         return
 
@@ -1521,6 +1565,105 @@ def connection_list_cmd(verbose: bool) -> None:
         console.print("\n[dim]Tip: Use [cyan]datalens connection-list --verbose[/cyan] for more details[/dim]")
 
     console.print("\nUsage: [cyan]datalens analyze --cc {connection_name}[/cyan]")
+
+
+@cli.command("init")
+@click.argument("folder", required=False, type=click.Path(file_okay=False))
+@click.option("--force", is_flag=True, help="Overwrite files that already exist.")
+@click.option("--no-example", is_flag=True, help="Don't add the example connection (connections/my_files.yaml).")
+def init_cmd(folder: str | None, force: bool, no_example: bool) -> None:
+    """
+    Create a config folder: config.yaml, secrets.yaml, .env and connections/.
+
+    FOLDER defaults to ~/.datalens (or $DATALENS_CONFIG_DIR). Use ./.datalens for a
+    per-project folder, or any path, e.g. /etc/datalens on a server. Existing files are kept.
+    """
+    from datalens.config.home import default_init_dir
+    from datalens.config.scaffold import init_config_dir
+
+    target = Path(folder).expanduser() if folder else default_init_dir()
+    results = init_config_dir(target, force=force, example=not no_example)
+    lines = [f"[green]✓ created[/green] {p}" if st == "created" else f"[dim]· kept    {p}[/dim]"
+             for p, st in results]
+    default = target.resolve() in {(Path.home() / ".datalens").resolve(), (Path.cwd() / ".datalens").resolve()}
+    use = "" if default else f"\nThis folder isn't searched by default. Use it with [cyan]--config-dir {target}[/cyan]" \
+                             f"\nor [cyan]export DATALENS_CONFIG_DIR={target}[/cyan]"
+    console.print(Panel(
+        "\n".join(lines) + use + "\n\n[bold]Next[/bold]\n"
+        f"  1. Edit [cyan]{target / 'connections' / 'my_files.yaml'}[/cyan] (or: datalens connection-new <name> --source …)\n"
+        "  2. [cyan]datalens analyze --cc my_files[/cyan]\n"
+        "  3. [cyan]datalens config-show[/cyan] to see what's in use",
+        title="◆ datalens init"))
+
+
+@cli.command("connection-new")
+@config_dir_option
+@click.argument("name")
+@click.option("--source", "-s", "source_type", required=True,
+              type=click.Choice(["file", "mongodb", "http", "s3", "bigquery"]), help="Data source type.")
+@click.option("--path", "-p", default=None, help="file: a file or folder of files.")
+@click.option("--uri", default=None, help="mongodb / http / s3: connection URI or URL.")
+@click.option("--project", default=None, help="bigquery: GCP project.")
+@click.option("--description", default=None, help="One line shown in connection-list --verbose.")
+@click.option("--force", is_flag=True, help="Overwrite an existing connection file.")
+def connection_new_cmd(name: str, source_type: str, path: str | None, uri: str | None, project: str | None,
+                       description: str | None, force: bool) -> None:
+    """Write connections/NAME.yaml in the config folder, ready to use with --cc NAME."""
+    import re as _re
+
+    from datalens.config.home import config_dirs, explicit_config_dir
+    from datalens.config.scaffold import write_connection
+
+    if not _re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise click.UsageError("NAME may contain letters, digits, '_', '-' and '.' only.")
+    folder = explicit_config_dir() or next((d for d in config_dirs() if d.is_dir()), Path.home() / ".datalens")
+    if path:
+        path = str(Path(path).expanduser().resolve())
+    file, status = write_connection(folder, name, source_type, force=force, path=path, uri=uri,
+                                    project=project, description=description)
+    if status == "kept":
+        raise click.UsageError(f"{file} already exists (use --force to overwrite).")
+    console.print(f"[green]✓[/green] Wrote [cyan]{file}[/cyan]\n"
+                  f"Edit it if needed, then run: [cyan]datalens analyze --cc {name}[/cyan]")
+
+
+@cli.command("config-show")
+@config_dir_option
+@click.option("--env", "-e", default=None, help="Also show the config-<env>.yaml overlay.")
+def config_show_cmd(env: str | None) -> None:
+    """Show which config folder and files Datalens is using, and where it looked."""
+    from datalens.config.home import ENV_VAR, config_dirs, explicit_config_dir
+
+    env = env or os.environ.get("DATALENS_ENV")
+    explicit = explicit_config_dir()
+    mode = (f"[bold]--config-dir / ${ENV_VAR}[/bold] = {explicit} (only this folder)" if explicit
+            else "default lookup: ./.datalens, then ~/.datalens (first match wins)")
+    lines = [mode, ""]
+    names = ["config.yaml"] + ([f"config-{env}.yaml"] if env else []) + ["secrets.yaml", ".env"]
+    chosen: dict[str, Path] = {}
+    for d in config_dirs():
+        lines.append(f"[bold]{d}[/bold] " + ("" if d.is_dir() else "[dim](doesn't exist)[/dim]"))
+        if not d.is_dir():
+            continue
+        for n in names:
+            p = d / n
+            if p.is_file():
+                used = n not in chosen
+                chosen.setdefault(n, p)
+                lines.append(f"  {'[green]✓ in use[/green]' if used else '[dim]· shadowed[/dim]'}  {n}")
+        conns = sorted(x.stem for x in (d / "connections").glob("*.yaml")) if (d / "connections").is_dir() else []
+        if conns:
+            lines.append(f"  connections/: {', '.join(conns)}")
+    missing = [n for n in names if n not in chosen]
+    if missing:
+        lines.append(f"\n[dim]Not found anywhere: {', '.join(missing)} (optional)[/dim]")
+    if not any(d.is_dir() for d in config_dirs()):
+        lines.append("\nNo config folder yet. Create one with [cyan]datalens init[/cyan].")
+    cfg = load_config(env=env)
+    lines.append(f"\n[bold]Effective defaults[/bold]  sample_size={cfg.sample_size} · "
+                 f"sample_strategy={cfg.sample_strategy} · out_dir={cfg.out_dir} · "
+                 f"ai={cfg.ai_provider or 'off'} · history_retention_days={cfg.history_retention_days}")
+    console.print(Panel("\n".join(lines), title="◆ datalens config"))
 
 
 @cli.command()
