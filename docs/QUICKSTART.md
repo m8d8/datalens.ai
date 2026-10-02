@@ -2,6 +2,9 @@
 
 Get from zero to your first interactive report in under 5 minutes.
 
+> Setting up for real use (config folder, credentials, servers, CI)? See the [Setup Guide](SETUP.md).
+> Questions? See the [FAQ](FAQ.md).
+
 ---
 
 ## 1. Install

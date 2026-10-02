@@ -503,7 +503,7 @@ All can be set in `.datalens/secrets.yaml` instead of env vars.
 
 ## See Also
 
-- [Connection Config Guide](CONNECTION_CONFIG.md) — Store connection + AI settings together
+- [Setup Connections](CONNECTION_CONFIG.md) — Store connection + AI settings together
 - [Usage Guide](USAGE.md) — Full CLI reference
 - [Anthropic Documentation](https://docs.anthropic.com/)
 - [GitHub Copilot Documentation](https://docs.github.com/en/copilot)

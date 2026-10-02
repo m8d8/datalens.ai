@@ -1,24 +1,25 @@
 [project]
 name = "datalens-ai"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Data health intelligence: profiling, quality scores, learned drift baselines, expected-schema checks and an action plan for any data source"
 readme = "README.md"
 license = "MIT"
 authors = [
     { name = "Datalens Contributors" }
 ]
-keywords = ["schema", "analysis", "profiling", "mongodb", "data-quality", "data-lineage"]
+keywords = ["data-quality", "data-profiling", "schema", "schema-drift", "data-drift", "data-contracts",
+            "json-schema", "pii", "mongodb", "bigquery", "observability", "cli"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
@@ -78,13 +79,29 @@ Homepage = "https://github.com/m8d8/datalens.ai"
 Documentation = "https://github.com/m8d8/datalens.ai#readme"
 Repository = "https://github.com/m8d8/datalens.ai"
 Issues = "https://github.com/m8d8/datalens.ai/issues"
+Changelog = "https://github.com/m8d8/datalens.ai/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "src/datalens/__init__.py"   # single source of truth: __version__
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/datalens"]
+
+[tool.hatch.build.targets.sdist]
+# Explicit allow-list: never ship local config, outputs, demo data or editor files to PyPI
+include = [
+    "/src/datalens",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+]
+exclude = ["tests/**/__pycache__"]
 
 [tool.ruff]
 line-length = 100

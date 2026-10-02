@@ -18,7 +18,8 @@ secrets.yml
 .datalens/secrets.yml
 .datalens/.env
 .datalens/*.local.yaml
-.datalens/connections/        # Local connection configs (keep private)
+# Local connection configs (keep private). Tracked examples stay tracked; new files are ignored.
+.datalens/connections/
 
 # Output and history (generated artifacts at runtime)
 /output/
@@ -49,3 +50,6 @@ tmp/**
 
 # Logs
 *.log
+
+# Local AI assistant settings
+.claude/settings.local.json
