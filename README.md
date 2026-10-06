@@ -27,6 +27,9 @@ affected. One health score, a prioritised Action Plan, and a gate that stops bad
 
 | | What it does |
 |---|---|
+| 🔎 **Deep data profiling** | Every object and field: coverage, null/empty, types, distinct counts, cardinality, examples and top values. A searchable, filterable **Field Explorer** with CSV export. |
+| 📊 **Distributions and patterns** | Value distributions, value-shape patterns (ids, slugs, ISO dates, emails…), mixed types and a **Content Universe** that shows what kind of data each object holds. |
+| 🔗 **Relationships and joins** | Keys, foreign keys, orphans, cross-object joins and nested structures, found from the data. |
 | 📉 **Drift detection** | Against yesterday, a learned normal range (`rolling`), or a certified baseline tag. Vanished fields, type changes, null spikes, renames, orphan keys, row-count drops. |
 | 🩺 **Health score + DQI** | One 0–100 verdict plus seven dimensions. Every score shows its formula. |
 | ✅ **Bring your own schema** | Validate against a JSON Schema contract, or infer one from good data and enforce it. |
@@ -35,6 +38,22 @@ affected. One health score, a prioritised Action Plan, and a gate that stops bad
 | 🚦 **CI/CD gate + Slack** | `--fail-on`, `--min-score`, `--max-drop` fail the pipeline step like a failing test. |
 | 🔒 **PII masking** | Detected PII is masked in every output by default. |
 | 🔌 **Many sources** | Files (JSON, JSONL, CSV, XML, Excel), MongoDB, S3, HTTP, BigQuery. |
+
+### See inside your data
+
+Health → **Data Quality**: a score per dimension and per object, with the fields that need attention.
+
+![Health > Data Quality: DQI, seven dimensions and per-object scores](https://raw.githubusercontent.com/m8d8/datalens.ai/main/docs/images/data-quality.png)
+
+Shape → **Insights**: the data story and a Content Universe built from low-cardinality, well-filled fields.
+
+![Shape > Insights: data story and Content Universe](https://raw.githubusercontent.com/m8d8/datalens.ai/main/docs/images/data-story.png)
+
+Structure → **Field Explorer**: search, filter and export every field with its coverage, types, distinct count and cardinality.
+
+![Structure > Field Explorer](https://raw.githubusercontent.com/m8d8/datalens.ai/main/docs/images/field-explorer.png)
+
+*All from the bundled cricket demo (day 1). See [Report Guide](https://github.com/m8d8/datalens.ai/blob/main/docs/REPORT_GUIDE.md) for every tab.*
 
 📄 Share it: the **[one-page overview](https://github.com/m8d8/datalens.ai/blob/main/docs/ONE_PAGER.md)**.
 

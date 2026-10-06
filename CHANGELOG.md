@@ -20,6 +20,7 @@ All notable changes to this project are listed here. The format follows
   WSL), extras, upgrade and uninstall, and fixes for common errors.
 
 ### Fixed
+- Content Universe no longer charts lists of ids (`umpire_ids`, `team_ids`) as content.
 - CSV and Excel: empty columns that are out of line with the file's header convention are skipped: a blank header, or
   a generated name (`col_6`, `Column1`, `Unnamed: 3`) in a file whose other headers are real names. If most headers are
   generated (`Column1, Column2, Column3`), that is the convention and an empty column is kept. Named columns and

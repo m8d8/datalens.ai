@@ -12,6 +12,8 @@ The pipeline ran green, but the data was wrong: rows dropped, a field vanished, 
 
 | Capability | Why it matters |
 |---|---|
+| **Deep data profiling** | Coverage, nulls, types, distinct counts, cardinality and examples for every field, in a searchable Field Explorer. |
+| **Distributions, patterns, relationships** | Value distributions and shapes, a Content Universe of what the data is about, keys, foreign keys, orphans and joins across objects. |
 | **Drift vs previous, rolling or tagged baseline** | Catches changes against yesterday, a learned normal range, or a certified release. Learned bands stop false alarms on normal wobble. |
 | **Health score + 7-dimension DQI** | One number for executives; completeness, validity, timeliness and more for engineers. Every score shows its formula. |
 | **Schema and coverage drift** | Vanished fields, type changes, null spikes, new categories, likely renames, orphaned foreign keys. |

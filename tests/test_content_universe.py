@@ -75,3 +75,8 @@ def test_field_present_in_every_object_outranks_a_better_looking_partial_one():
 
 def test_single_value_field_alone_is_not_shown():
     assert build_content_universe(_schema(_field("Platform", {"x": 1000})))["dimensions"] == []
+
+
+def test_lists_of_ids_are_not_content():
+    ids = _field("umpire_ids[]", {"a1": 600, "b2": 400})
+    assert build_content_universe(_schema(ids, _field("team_ids", {"a": 500, "b": 500})))["dimensions"] == []

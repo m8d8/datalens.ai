@@ -145,6 +145,9 @@ UNIVERSE_MIN_RECORDS = 30
 """Tiny lookup/config objects don't describe a content universe."""
 
 
+_ID_LIKE_TOKENS = {"ids", "uuids", "guids", "keys", "codes", "slugs", "refs"}
+"""Plural identifier words (umpire_ids, team_ids): lists of ids describe links, not content."""
+
 _TYPE_LIKE = {"type", "__type", "kind", "category", "recordtype", "doctype", "genre", "class", "segment", "status"}
 
 
@@ -198,7 +201,11 @@ def build_content_universe(schema_json: dict[str, Any]) -> dict[str, Any]:
         obj_name = obj.get("object", "")
         for f in obj.get("fields", []):
             path = f.get("path", "")
-            if is_identifier_name(path) or is_placeholder_name(leaf_name(path)):
+            if (
+                is_identifier_name(path)
+                or is_placeholder_name(leaf_name(path))
+                or name_tokens(leaf_name(path)) & _ID_LIKE_TOKENS
+            ):
                 continue
             sampled = f.get("sampled_docs") or obj.get("sampled") or 0
             types = f.get("types") or {}
