@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 
 from datalens.connectors.base import Connector, ObjectRef, Record
+from datalens.profiling.naming import is_placeholder_name
 
 if TYPE_CHECKING:
     from datalens.config import Config
@@ -56,6 +57,7 @@ class FileConnector(Connector):
         self._compression: str | None = None
         self._zip_member: str | None = None
         self._objects: list[ObjectRef] = []
+        self._blank_headers: set[str] = set()
 
     def connect(self) -> None:
         """Validate the path exists and build the list of objects to sample."""
@@ -315,10 +317,50 @@ class FileConnector(Connector):
         obj.metadata["total_rows"] = total
         yield from picked
 
+    @staticmethod
+    def _is_empty(value: Any) -> bool:
+        return value is None or (isinstance(value, str) and not value.strip())
+
+    def _dead_placeholder_columns(self, obj: ObjectRef) -> set[str]:
+        """
+        Columns of a CSV/Excel sheet whose name is out of line with the rest of the
+        file and which have no value in any row: export leftovers, not data.
+
+        Out of line means a blank header, or a generated name (col_6, Column1,
+        Unnamed: 3) in a file whose other headers are real names. When most
+        headers are generated (Column1, Column2, Column3…), that *is* the file's
+        convention and an empty column is kept. Named columns are always kept.
+        Streams the file, stopping once every candidate has shown a value.
+        """
+        reader = self._sample_csv if self._file_type == ".csv" else self._sample_excel
+        args = (0,) if self._file_type == ".csv" else (obj, 0)
+        placeholders: set[str] | None = None
+        has_data: set[str] = set()
+        for record in reader(*args):
+            if placeholders is None:
+                blank = self._blank_headers & set(record)
+                generated = {k for k in record if k not in blank and is_placeholder_name(k)}
+                named_total = len(record) - len(blank)
+                generic_convention = named_total > 0 and len(generated) * 2 > named_total
+                placeholders = blank | (set() if generic_convention else generated)
+                if not placeholders:
+                    return set()
+            has_data.update(k for k in placeholders - has_data if not self._is_empty(record.get(k)))
+            if has_data == placeholders:
+                return set()
+        return (placeholders or set()) - has_data
+
     def _read_records(
         self, obj: ObjectRef, sample_size: int, max_depth: int | None
     ) -> Iterator[Record]:
         """Dispatch to the format-specific reader (sample_size=0 reads everything)."""
+        if self._file_type in {".csv", ".xlsx", ".xls"}:
+            dead = self._dead_placeholder_columns(obj)
+            if dead:
+                obj.metadata["skipped_columns"] = sorted(dead)
+            for record in self._read_tabular(obj, sample_size):
+                yield {k: v for k, v in record.items() if k not in dead} if dead else record
+            return
         if self._file_type == ".csv":
             yield from self._sample_csv(sample_size)
         elif self._file_type == ".json":
@@ -328,6 +370,12 @@ class FileConnector(Connector):
         elif self._file_type == ".xml":
             yield from self._sample_xml(sample_size)
         elif self._file_type in {".xlsx", ".xls"}:
+            yield from self._sample_excel(obj, sample_size)
+
+    def _read_tabular(self, obj: ObjectRef, sample_size: int) -> Iterator[Record]:
+        if self._file_type == ".csv":
+            yield from self._sample_csv(sample_size)
+        else:
             yield from self._sample_excel(obj, sample_size)
 
     @staticmethod
@@ -378,8 +426,13 @@ class FileConnector(Connector):
 
             reader = csv.reader(f, dialect)
 
+            self._blank_headers = set()
             if has_header:
                 headers = next(reader)
+                for i, h in enumerate(headers):
+                    if not h or not h.strip():
+                        headers[i] = f"col_{i+1}"
+                        self._blank_headers.add(headers[i])
             else:
                 # Auto-generate headers
                 first_row = next(reader)
@@ -510,8 +563,9 @@ class FileConnector(Connector):
             wb.close()
             return
 
-        # Clean headers (None -> col_N)
-        headers = [h if h else f"col_{i+1}" for i, h in enumerate(headers)]
+        # Blank headers (None -> col_N); remembered so they can be told apart from named columns
+        self._blank_headers = {f"col_{i+1}" for i, h in enumerate(headers) if self._is_empty(h)}
+        headers = [h if not self._is_empty(h) else f"col_{i+1}" for i, h in enumerate(headers)]
 
         count = 0
         for row in rows:

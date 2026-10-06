@@ -5,7 +5,7 @@ Short answers, with links to the details.
 **About Datalens:** [What is it?](#what-is-datalens) · [What sources?](#which-data-sources-does-it-support) ·
 [Do I need AI?](#do-i-need-ai) · [Does my data leave my machine?](#does-my-data-leave-my-machine)
 
-**Getting started:** [Fastest start](#whats-the-fastest-way-to-try-it) · [Do I need config?](#do-i-need-a-config-file) ·
+**Getting started:** [Fastest start](#whats-the-fastest-way-to-try-it) · ["No matching distribution"](#pip-install-says-no-matching-distribution-found-for-datalens-ai) · [Do I need config?](#do-i-need-a-config-file) ·
 [Where does config live?](#where-does-datalens-look-for-config) · [Use my own folder](#how-do-i-use-a-config-folder-somewhere-else)
 
 **Running it:** [Sample size](#how-do-i-change-the-sample-size) · [Full dataset](#how-do-i-run-on-the-full-dataset) ·
@@ -61,6 +61,15 @@ datalens analyze --source file --path your_data.csv
 ```
 Then open `output/<name>_<tag>/<tag>-datalens-report.html`. Want a demo with real drift? Clone the repo and run
 `bash examples/demo/run_demo.sh`.
+
+### `pip install` says "No matching distribution found for datalens-ai"
+Your `pip` belongs to a Python older than 3.11. The message includes *"Ignored the following versions that require a
+different python version"*. On macOS this is usually the built-in Python 3.9. Check with `pip --version`, then:
+```bash
+pipx install datalens-ai                 # or: uv tool install datalens-ai (both choose a suitable Python)
+python3.12 -m venv .venv && source .venv/bin/activate && pip install datalens-ai   # or a venv with 3.11+
+```
+No Python 3.11+ installed? The [Install guide](INSTALL.md) covers every method on macOS and Windows.
 
 ### Do I need a config file?
 No. Every option is also a CLI flag. A config folder saves you repeating flags, keeps credentials out of your

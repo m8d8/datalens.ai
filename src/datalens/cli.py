@@ -446,6 +446,12 @@ def cli() -> None:
     help="Model for --ai (default: auto — the provider picks). A model the provider rejects falls back to auto.",
 )
 @click.option(
+    "--pii-detection/--no-pii-detection",
+    default=None,
+    help="Detect PII in field names and values (default: enabled; config key pii_detection). "
+         "Use --no-pii-detection to see values that were flagged as possible PII.",
+)
+@click.option(
     "--mask-pii/--no-mask-pii",
     default=True,
     help="Mask detected PII in reports (default: enabled)",
@@ -503,6 +509,7 @@ def analyze_cmd(
     ai: str,
     ai_model: str | None,
     mask_pii: bool,
+    pii_detection: bool | None,
     debug: bool,
 ) -> None:
     """
@@ -650,6 +657,7 @@ def analyze_cmd(
             ai_provider=ai if ai != "auto" else "",
             ai_model=ai_model,
             mask_pii=mask_pii,
+            pii_detection=pii_detection,
             debug=debug,
         )
 
@@ -851,6 +859,8 @@ def analyze_cmd(
             title="[bold cyan]◆ Datalens Results[/bold cyan]",
         ))
 
+        _print_sampling_note(result.schema_json, config.sample_size)
+
         _print_scores_and_drift(run_summary)
 
         # Quality gates → exit code, then notifications.
@@ -967,6 +977,31 @@ def _merge_drift_rules(
         data = yaml.safe_load(Path(rules_file).read_text(encoding="utf-8")) or {}
         merged = _merge(merged, data.get("drift", data) if isinstance(data, dict) else {})
     return merged
+
+
+def _print_sampling_note(schema_json: dict, sample_size: int) -> None:
+    """Say so when results come from a sample, and how to run on the full data."""
+    if not sample_size:
+        return
+    sampled_objs = []
+    for obj in schema_json.get("objects", []):
+        sampled, total = obj.get("sampled", 0), obj.get("total_rows")
+        if total is not None and total > sampled:
+            sampled_objs.append((obj.get("object", ""), sampled, total))
+        elif total is None and sampled >= sample_size:  # hit the cap; true size unknown
+            sampled_objs.append((obj.get("object", ""), sampled, None))
+    if not sampled_objs:
+        return
+    console.print()
+    console.print(f"[yellow]⚠ Results are based on a sample (limit {sample_size:,} records per object), not the full data.[/yellow]")
+    for name, sampled, total in sampled_objs[:10]:
+        of = f"{total:,}" if total is not None else "more than that"
+        console.print(f"  • {name}: {sampled:,} sampled of {of}")
+    if len(sampled_objs) > 10:
+        console.print(f"  • … and {len(sampled_objs) - 10} more object(s)")
+    console.print("[yellow]  Counts, coverage and distributions are estimates; rare values may be missing. "
+                  "For exact results re-run with[/yellow] [bold]--full-scan[/bold] "
+                  "[dim](or --sample-size N for a bigger sample).[/dim]")
 
 
 def _print_scores_and_drift(summary: dict[str, Any]) -> None:

@@ -13,13 +13,31 @@ then only the parts you need.
 
 ## 1. Install
 
-```bash
-pip install datalens-ai              # or: uv tool install datalens-ai  /  pipx install datalens-ai
-datalens --help
-```
+Datalens needs **Python 3.11 or newer**. Pick whichever install method you already use:
 
-Extras: `datalens-ai[ai]` (Anthropic/OpenAI SDKs), `[bigquery]`, `[cloud]` (S3, HTTP, SFTP), `[all]`.
-Python 3.11 or newer.
+| Method | Best for | Commands |
+|---|---|---|
+| **pipx** | Using the `datalens` command | `pipx install datalens-ai` |
+| **uv** | Same, and faster | `uv tool install datalens-ai` |
+| **venv + pip** | A project, or calling it from Python code | `python3.12 -m venv .venv && source .venv/bin/activate && pip install datalens-ai` |
+| **conda** | Teams already on conda | `conda create -n datalens python=3.12 -y && conda activate datalens && pip install datalens-ai` |
+
+Then check it: `datalens version`.
+
+**Step by step for macOS and Windows**, every method plus troubleshooting: [Install](INSTALL.md).
+
+Extras: `datalens-ai[ai]` (Anthropic/OpenAI SDKs), `[bigquery]`, `[cloud]` (S3, HTTP, SFTP), `[all]`, e.g.
+`pipx install "datalens-ai[ai,bigquery]"`. Upgrade with `pipx upgrade datalens-ai`, `uv tool upgrade datalens-ai`
+or `pip install -U datalens-ai`.
+
+**No Python 3.11+?** macOS: `brew install python@3.12` · Ubuntu/Debian: `sudo apt install python3.12 python3.12-venv`
+(or the deadsnakes PPA) · Windows: the installer from [python.org](https://www.python.org/downloads/) · anywhere: `pyenv install 3.12`.
+
+> **"No matching distribution found for datalens-ai"?** Your `pip` belongs to an older Python (on macOS, often the
+> built-in 3.9). Check with `pip --version`, then use one of the methods above with a 3.11+ Python.
+>
+> **"externally-managed-environment"?** Your system Python (Homebrew, Debian/Ubuntu) blocks outside installs into
+> it. Use pipx, uv or a venv instead of `pip install` on the system Python.
 
 ## 2. Your first report: no config needed
 
@@ -95,6 +113,7 @@ Defaults for every run. Any CLI flag overrides the same key.
 | `history_protected_tags` | `[baseline]` | `--history-protected-tag` | Runs with these tags are never deleted. |
 | `ai_provider` | off | `--ai` | `claude`, `copilot`, `cursor`, `anthropic`, `openai` or `auto`. |
 | `ai_model` | `auto` | `--ai-model` | Model for that provider. |
+| `pii_detection` | `true` | `--pii-detection` / `--no-pii-detection` | Detect PII from field names and values. `false` turns off PII findings, lock badges and masking, so you can see the raw values that were flagged. Env: `DATALENS_PII_DETECTION`. |
 | `mask_pii` | `true` | `--mask-pii` / `--no-mask-pii` | Mask PII values in reports and anything sent to AI. |
 | `drift` | built-in rules | `--compare-to`, … | Drift rules and the comparison mode: see [Drift rules](USAGE.md#drift-rules--thresholds-per-dataset-object-and-field). |
 

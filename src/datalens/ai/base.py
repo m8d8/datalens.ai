@@ -16,7 +16,8 @@ AUTO = "auto"
 
 _MODEL_ERROR = re.compile(
     r"model.{0,80}(not[ _]found|not_found_error|invalid|unknown|does not exist|not available|unsupported|"
-    r"not supported|no access|not allowed)|(invalid|unknown|unsupported)[ _]model",
+    r"not supported|no access|not allowed)|(invalid|unknown|unsupported)[ _]model|"
+    r"does not support (this|the|that) model",
     re.IGNORECASE | re.DOTALL,
 )
 

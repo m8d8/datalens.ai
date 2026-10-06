@@ -191,8 +191,9 @@ def analyze(
         # Phase 3+: Advanced analytics
         patterns_data = analyze_patterns(schema_json)
         quality_data = compute_schema_quality(schema_json, patterns_data=patterns_data)
-        pii_data = detect_pii_in_schema(
-            schema_json, ignore=config.pii_ignore, force=config.pii_force,
+        pii_data = (
+            detect_pii_in_schema(schema_json, ignore=config.pii_ignore, force=config.pii_force)
+            if config.pii_detection else {}
         )
         pii_summary = get_pii_summary(pii_data) if pii_data else None
         statistics_data = compute_statistics_summary(schema_json)
@@ -329,7 +330,7 @@ def analyze(
             current_metrics=result.metrics,
             current_run_date=config.run_date,
             ai_insights=result.ai_insights,
-            include_pii=True,
+            include_pii=config.pii_detection,
             include_quality=True,
             include_relationships=True,
             include_statistics=True,

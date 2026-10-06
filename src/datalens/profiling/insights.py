@@ -133,52 +133,140 @@ def build_locale_dimensions(
 
 # ─── Content Universe ────────────────────────────────────────────────────────
 
+UNIVERSE_MIN_COVERAGE = 0.90
+"""A field describes the data only when at least this share of records has a value."""
+
+UNIVERSE_MAX_DISTINCT = 50
+UNIVERSE_PIE_BELOW = 10
+"""Fewer distinct values than this → pie; up to UNIVERSE_MAX_DISTINCT → vertical bars."""
+
+UNIVERSE_MAX_FIELDS = 3
+UNIVERSE_MIN_RECORDS = 30
+"""Tiny lookup/config objects don't describe a content universe."""
+
+
+_TYPE_LIKE = {"type", "__type", "kind", "category", "recordtype", "doctype", "genre", "class", "segment", "status"}
+
+
+def _value_counts_pairs(vc: Any) -> list[tuple[Any, int]]:
+    if isinstance(vc, dict):
+        return [(k, int(v)) for k, v in vc.items()]
+    if isinstance(vc, list):
+        return [(p[0], int(p[1])) for p in vc if isinstance(p, (list, tuple)) and len(p) == 2]
+    return []
+
+
+def _combine_dimension(group: list[dict[str, Any]]) -> dict[str, Any]:
+    """One dimension for a field summed across all the objects that carry it."""
+    counts: Counter[str] = Counter()
+    for c in group:
+        for seg in c["segments"]:
+            counts[seg["label"]] += seg["count"]
+    total = sum(counts.values())
+    sampled = sum(c["_sampled"] for c in group)
+    distinct = len(counts)
+    return {
+        "object": f"All {len(group)} objects combined",
+        "aggregate": True,
+        "field": group[0]["field"],
+        "kind": "pie" if distinct < UNIVERSE_PIE_BELOW else "bar",
+        "distinct": distinct,
+        "coverage_pct": round(min(total / sampled, 1.0) * 100, 1) if sampled else 0.0,
+        "total_records": total,
+        "segments": [{"label": k, "count": v, "pct": v / total * 100} for k, v in counts.most_common()],
+        "_sampled": sampled, "_leaf": group[0]["_leaf"], "_type_like": group[0]["_type_like"],
+    }
+
+
 def build_content_universe(schema_json: dict[str, Any]) -> dict[str, Any]:
     """
-    Detect record-type segments suitable for a donut visualization.
+    Pick 0–3 fields whose value distribution says what kind of data this is.
 
-    Strategy: find a low-cardinality string field commonly named like a
-    type/category and present in most objects (`type`, `__type`, `kind`,
-    `category`, `recordType`). For each detected object, count records per
-    type value (from value_counts when available, else from sampled).
+    A field qualifies when it is text, not an identifier, has 2–50 distinct values
+    (not nearly unique) and a value in ≥90% of records. A field is shown for every
+    object that has it with ≥90% coverage (even a single value), so objects can be
+    compared; ``dimensions`` lists one entry per object and field. Fewer than 10 distinct
+    values are drawn as a pie, 10–50 as vertical bars (``kind``). When no field
+    qualifies, ``dimensions`` is empty and no chart is shown.
 
-    Gracefully returns empty segments if no obvious type field is found.
+    ``field`` / ``segments`` / ``total_records`` mirror the first dimension.
     """
-    type_keys = {"type", "__type", "kind", "category", "recordtype", "doctype"}
-    segments: Counter[str] = Counter()
-    found_field: str | None = None
+    from datalens.profiling.naming import is_identifier_name, is_placeholder_name, leaf_name, name_tokens
 
+    candidates: list[dict[str, Any]] = []
     for obj in schema_json.get("objects", []):
-        name = obj.get("object", "")
+        obj_name = obj.get("object", "")
         for f in obj.get("fields", []):
             path = f.get("path", "")
-            leaf = path.split(".")[-1].lower()
-            if leaf not in type_keys:
+            if is_identifier_name(path) or is_placeholder_name(leaf_name(path)):
                 continue
-            vc = f.get("value_counts") or {}
-            if isinstance(vc, list):
-                pairs = [(p[0], p[1]) for p in vc if isinstance(p, (list, tuple)) and len(p) == 2]
-            elif isinstance(vc, dict):
-                pairs = list(vc.items())
-            else:
-                pairs = []
-            if not pairs:
+            sampled = f.get("sampled_docs") or obj.get("sampled") or 0
+            types = f.get("types") or {}
+            non_null_types = {t: c for t, c in types.items() if t != "null"}
+            if sampled < UNIVERSE_MIN_RECORDS or not non_null_types:
                 continue
-            found_field = leaf
-            for val, count in pairs:
-                if val is None:
-                    continue
-                segments[str(val)] += int(count)
-            break  # one type-like field per object is enough
+            if max(non_null_types, key=non_null_types.get) != "string":
+                continue
+            pairs = [(k, c) for k, c in _value_counts_pairs(f.get("value_counts")) if k is not None and c > 0]
+            distinct = len(pairs)
+            if not (1 <= distinct <= UNIVERSE_MAX_DISTINCT):
+                continue
+            if f.get("distinct_is_exact") is False:
+                continue
+            total = sum(c for _, c in pairs)
+            coverage = total / sampled
+            if coverage < UNIVERSE_MIN_COVERAGE or (distinct > 1 and distinct > total * 0.5):
+                continue
+            pairs.sort(key=lambda kv: -kv[1])
+            leaf = leaf_name(path)
+            candidates.append({
+                "object": obj_name,
+                "field": path,
+                "kind": "pie" if distinct < UNIVERSE_PIE_BELOW else "bar",
+                "distinct": distinct,
+                "coverage_pct": round(min(coverage, 1.0) * 100, 1),
+                "total_records": total,
+                "segments": [{"label": str(k), "count": c, "pct": c / total * 100} for k, c in pairs],
+                "_sampled": sampled,
+                "_type_like": bool(name_tokens(leaf) & _TYPE_LIKE),
+                "_leaf": leaf.lower(),
+            })
 
-    total = sum(segments.values())
+    # Group the same field across objects (Provider in every sheet). A field that qualifies
+    # in every object is the best shared yardstick for the whole dataset, so groups are ranked
+    # by how many objects they cover, then by name hint and coverage. Each group shows one
+    # chart per object plus, with 2+ objects, a combined chart (counts summed across objects).
+    # A single-value object only rides along with a field that has real variety somewhere.
+    n_objects = max(1, len(schema_json.get("objects", [])))
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for c in candidates:
+        groups.setdefault(c["_leaf"], []).append(c)
+    groups = {k: v for k, v in groups.items() if any(c["distinct"] >= 2 for c in v)}
+    ordered = sorted(
+        groups.values(),
+        key=lambda g: (
+            -len(g) / n_objects,
+            not any(c["_type_like"] for c in g),
+            -max(c["coverage_pct"] for c in g if c["distinct"] >= 2),
+            -sum(c["total_records"] for c in g),
+            g[0]["_leaf"],
+        ),
+    )[:UNIVERSE_MAX_FIELDS]
+    ranked: list[dict[str, Any]] = []
+    for g in ordered:
+        if len(g) > 1:
+            ranked.append(_combine_dimension(g))
+        ranked.extend(g)
+    for c in ranked:
+        for k in ("_type_like", "_leaf", "_sampled"):
+            c.pop(k, None)
+
+    first = ranked[0] if ranked else None
     return {
-        "field": found_field,
-        "total_records": total,
-        "segments": [
-            {"label": k, "count": v, "pct": (v / total * 100) if total else 0.0}
-            for k, v in segments.most_common(10)
-        ],
+        "dimensions": ranked,
+        "field": first["field"] if first else None,
+        "total_records": first["total_records"] if first else 0,
+        "segments": first["segments"][:10] if first else [],
     }
 
 
@@ -201,11 +289,9 @@ def build_data_story(
         f"The dataset spans {n_obj} object(s) with {n_fields} field(s) across {n_sampled:,} sampled record(s)."
     )
 
-    if universe and universe.get("segments"):
-        seg_str = ", ".join(
-            f"{s['label']} ({s['pct']:.0f}%)" for s in universe["segments"][:3]
-        )
-        parts.append(f"Detected content segments via `{universe['field']}`: {seg_str}.")
+    for dim in (universe or {}).get("dimensions", []):
+        seg_str = ", ".join(f"{s['label']} ({s['pct']:.0f}%)" for s in dim["segments"][:3])
+        parts.append(f"`{dim['field']}` ({dim['object']}) describes the content: {seg_str}.")
 
     if quality is not None:
         dqi = getattr(quality, "overall_dqi", None)
@@ -316,7 +402,7 @@ def build_swot(
     if not strengths:
         strengths.append("No prominent strengths detected — see recommendations to improve.")
     if not opportunities:
-        opportunities.append("Increase distinct sampling or enable AI insights for deeper opportunities.")
+        opportunities.append("No rule-based opportunities found in this data. A larger sample can surface more; AI-suggested ideas, when AI is enabled, are in the AI Review on the Verdict tab.")
     if not threats:
         threats.append("No critical threats detected.")
 

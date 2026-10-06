@@ -19,10 +19,31 @@ offline HTML report, a JSON summary for CI/CD, and an optional chat you can ask 
 
 ---
 
+## Why Datalens
+
+**For leaders:** know when your data changed, what broke and what to fix, before dashboards, reports or models are
+affected. One health score, a prioritised Action Plan, and a gate that stops bad data in CI.
+**For engineers:** one command, no rules to write first. It learns normal, diffs every run, and explains every number.
+
+| | What it does |
+|---|---|
+| 📉 **Drift detection** | Against yesterday, a learned normal range (`rolling`), or a certified baseline tag. Vanished fields, type changes, null spikes, renames, orphan keys, row-count drops. |
+| 🩺 **Health score + DQI** | One 0–100 verdict plus seven dimensions. Every score shows its formula. |
+| ✅ **Bring your own schema** | Validate against a JSON Schema contract, or infer one from good data and enforce it. |
+| 🧭 **Action Plan** | Each finding becomes one prioritised action: evidence, impact, copy-ready fix. |
+| 🤖 **AI review and chat** | Plain-English explanations and `datalens ask`. Claude, OpenAI, Cursor, Copilot, or off. |
+| 🚦 **CI/CD gate + Slack** | `--fail-on`, `--min-score`, `--max-drop` fail the pipeline step like a failing test. |
+| 🔒 **PII masking** | Detected PII is masked in every output by default. |
+| 🔌 **Many sources** | Files (JSON, JSONL, CSV, XML, Excel), MongoDB, S3, HTTP, BigQuery. |
+
+📄 Share it: the **[one-page overview](https://github.com/m8d8/datalens.ai/blob/main/docs/ONE_PAGER.md)**.
+
+---
+
 ## Get started in 2 minutes
 
 ```bash
-pip install datalens-ai
+pip install datalens-ai      # Python 3.11+; or pipx / uv / conda: see the Install guide
 datalens analyze --source file --path your_data.csv      # no config needed; report in output/<name>_<tag>/
 ```
 
@@ -37,6 +58,32 @@ datalens analyze --cc orders
 Keep config anywhere (a server, a shared repo) with `--config-dir /path` or `DATALENS_CONFIG_DIR`, and run
 `datalens config-show` to see what's in use.
 
+### Two commands to remember
+
+Use the same `-o` folder for both, since the run history that drift reads lives in `<out-dir>/.history`.
+The tag `baseline` is never deleted by history retention.
+
+**a) Analyze with AI and set the baseline** (JSON, JSONL, CSV, XML or Excel):
+
+```bash
+datalens analyze -s file -p data/orders.json -o output/orders --version-tag baseline --ai claude
+datalens analyze -s file -p data/orders.xlsx -o output/orders --version-tag baseline --ai claude   # Excel
+# several files in a folder:  -p data/ --pattern "*.jsonl.gz"     specific sheets:  --sheets "Sheet1,Sheet2"
+```
+
+**b) Analyze with AI and check drift against the baseline, tagging this run `yyyymmdd-hhmmss`:**
+
+```bash
+datalens analyze -s file -p data/orders.json -o output/orders \
+  --version-tag "$(date +%Y%m%d-%H%M%S)" --compare-to baseline --ai claude
+```
+
+`--compare-to` also takes `previous` (the last run, default), `rolling` (learned normal range) or any other tag.
+Add `--fail-on fail` to exit non-zero in CI. On Windows PowerShell use `(Get-Date -Format "yyyyMMdd-HHmmss")`
+in place of `$(date +%Y%m%d-%H%M%S)`. For a database or API, swap the source flags for `--cc <connection>`.
+Every flag: [Usage Guide](https://github.com/m8d8/datalens.ai/blob/main/docs/USAGE.md) ·
+runnable version: [scenario 04](https://github.com/m8d8/datalens.ai/blob/main/examples/scenarios/04-fixed-baseline/README.md).
+
 📘 **[Setup Guide](https://github.com/m8d8/datalens.ai/blob/main/docs/SETUP.md)** (with [Setup Connections](https://github.com/m8d8/datalens.ai/blob/main/docs/CONNECTION_CONFIG.md)) ·
 ❓ **[FAQ](https://github.com/m8d8/datalens.ai/blob/main/docs/FAQ.md)**: sample size, full scans, output folder, history, how drift works, CI/CD.
 
@@ -44,7 +91,8 @@ Keep config anywhere (a server, a shared repo) with `--config-dir /path` or `DAT
 
 ## Contents
 
-- [Get started in 2 minutes](#get-started-in-2-minutes)
+- [Why Datalens](#why-datalens)
+- [Get started in 2 minutes](#get-started-in-2-minutes) (incl. [baseline and drift commands](#two-commands-to-remember))
 - [Day 1 vs day 2 in 60 seconds](#day-1-vs-day-2-in-60-seconds)
 - [It learns what normal looks like](#it-learns-what-normal-looks-like)
 - [It tells you what to do next](#it-tells-you-what-to-do-next)
@@ -253,11 +301,15 @@ datalens analyze --source bigquery --project my-proj --dataset shop --tables ord
 ## Install
 
 ```bash
-pip install datalens-ai                 # core: files, MongoDB, HTTP
+pip install datalens-ai                 # core: files and MongoDB
 pip install "datalens-ai[ai]"           # + Anthropic / OpenAI SDKs (CLI logins need nothing extra)
 pip install "datalens-ai[bigquery]"     # + Google BigQuery connector
+pip install "datalens-ai[cloud]"        # + S3, HTTP/REST APIs, SFTP
 pip install "datalens-ai[all]"          # everything
 ```
+
+Needs Python 3.11+. Every way to install on macOS and Windows (pipx, uv, venv, conda, from source, WSL) and
+fixes for common errors: **[Install guide](https://github.com/m8d8/datalens.ai/blob/main/docs/INSTALL.md)**.
 
 The command is `datalens` (`datalens --help`). From source, for development:
 
@@ -318,6 +370,8 @@ Reproduce every run and screenshot in this README: `AI=claude bash examples/demo
 
 | Guide | What it covers |
 |---|---|
+| 📄 [One-pager](https://github.com/m8d8/datalens.ai/blob/main/docs/ONE_PAGER.md) | What it does and who it helps, on a page to share. |
+| 💻 [Install](https://github.com/m8d8/datalens.ai/blob/main/docs/INSTALL.md) | macOS and Windows: pipx, uv, venv, conda, source, WSL; extras; troubleshooting. |
 | ⚙️ [Setup Guide](https://github.com/m8d8/datalens.ai/blob/main/docs/SETUP.md) | Config folder (`init`, `--config-dir`), app config, secrets, environments, servers and CI. |
 | ↳ 🔐 [Setup Connections](https://github.com/m8d8/datalens.ai/blob/main/docs/CONNECTION_CONFIG.md) | One file per data source: every source type, auth and option. |
 | ❓ [FAQ](https://github.com/m8d8/datalens.ai/blob/main/docs/FAQ.md) | Common questions: what it does, getting started, sampling, history, drift, CI/CD. |

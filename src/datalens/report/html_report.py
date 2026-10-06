@@ -1912,50 +1912,103 @@ def _ai_status_to_sev(status: str) -> str:
     return {"pass": "low", "warn": "medium", "fail": "high"}.get(status, "low")
 
 
-def _render_content_universe(universe: dict[str, Any]) -> str:
-    segments = universe.get("segments") or []
-    if not segments:
-        return ""
+_UNIVERSE_PALETTE = [
+    "#4f8cff", "#ff7f50", "#7ed957", "#ffd166", "#c77dff",
+    "#06d6a0", "#ef476f", "#118ab2", "#f78c6b", "#8ac926",
+]
+
+
+def _universe_pie(dim: dict[str, Any]) -> str:
     import math
-    total = universe.get("total_records", 0) or 1
-    palette = [
-        "#4f8cff", "#ff7f50", "#7ed957", "#ffd166", "#c77dff",
-        "#06d6a0", "#ef476f", "#118ab2", "#f78c6b", "#8ac926",
-    ]
+    segments = dim["segments"]
+    total = dim.get("total_records", 0) or 1
     cx, cy, r_outer, r_inner = 130, 130, 110, 60
-    paths = []
-    legend = []
+    paths, legend = [], []
     angle = -math.pi / 2
     for i, seg in enumerate(segments):
-        portion = seg["count"] / total
-        sweep = portion * 2 * math.pi
+        sweep = seg["count"] / total * 2 * math.pi
+        sweep = min(sweep, 2 * math.pi - 0.0001)  # a single full slice can't be one arc
         a2 = angle + sweep
         large = 1 if sweep > math.pi else 0
         x1 = cx + r_outer * math.cos(angle); y1 = cy + r_outer * math.sin(angle)
         x2 = cx + r_outer * math.cos(a2);   y2 = cy + r_outer * math.sin(a2)
         x3 = cx + r_inner * math.cos(a2);   y3 = cy + r_inner * math.sin(a2)
         x4 = cx + r_inner * math.cos(angle); y4 = cy + r_inner * math.sin(angle)
-        color = palette[i % len(palette)]
+        color = _UNIVERSE_PALETTE[i % len(_UNIVERSE_PALETTE)]
+        label = html.escape(seg["label"])
         paths.append(
             f'<path d="M {x1:.1f} {y1:.1f} A {r_outer} {r_outer} 0 {large} 1 {x2:.1f} {y2:.1f} '
             f'L {x3:.1f} {y3:.1f} A {r_inner} {r_inner} 0 {large} 0 {x4:.1f} {y4:.1f} Z" '
-            f'fill="{color}" />'
+            f'fill="{color}"><title>{label}: {seg["count"]:,} ({seg["pct"]:.1f}%)</title></path>'
         )
         legend.append(
             f'<div class="legend-row"><span class="legend-swatch" style="background:{color}"></span>'
-            f'{html.escape(seg["label"])} — {seg["count"]:,} ({seg["pct"]:.1f}%)</div>'
+            f'{label} — {seg["count"]:,} ({seg["pct"]:.1f}%)</div>'
         )
         angle = a2
+    return (
+        '<div class="universe-layout">'
+        f'<svg viewBox="0 0 260 260" width="260" height="260" role="img" '
+        f'aria-label="Distribution of {html.escape(dim["field"])}">{"".join(paths)}</svg>'
+        f'<div class="universe-legend">{"".join(legend)}</div></div>'
+    )
 
+
+def _universe_bars(dim: dict[str, Any]) -> str:
+    """Vertical bar leaderboard, largest first, one colour per bar."""
+    segments = dim["segments"]
+    n = len(segments)
+    top = max(seg["count"] for seg in segments) or 1
+    bar_w, gap, left, chart_h, label_h, top_pad = 22, 8, 10, 180, 110, 22
+    width = left * 2 + n * (bar_w + gap)
+    height = top_pad + chart_h + label_h
+    bars = []
+    for i, seg in enumerate(segments):
+        h = max(2, seg["count"] / top * chart_h)
+        x = left + i * (bar_w + gap)
+        y = top_pad + chart_h - h
+        color = _UNIVERSE_PALETTE[i % len(_UNIVERSE_PALETTE)]
+        label = html.escape(seg["label"])
+        short = html.escape(seg["label"] if len(seg["label"]) <= 18 else seg["label"][:17] + "…")
+        cx = x + bar_w / 2
+        bars.append(
+            f'<g><title>{label}: {seg["count"]:,} ({seg["pct"]:.1f}%)</title>'
+            f'<rect x="{x}" y="{y:.1f}" width="{bar_w}" height="{h:.1f}" rx="3" fill="{color}"/>'
+            f'<text x="{cx:.1f}" y="{y - 5:.1f}" text-anchor="middle" font-size="10" fill="currentColor">{seg["pct"]:.0f}%</text>'
+            f'<text x="{cx:.1f}" y="{top_pad + chart_h + 12}" font-size="11" fill="currentColor" '
+            f'transform="rotate(50 {cx:.1f} {top_pad + chart_h + 12})">{short}</text></g>'
+        )
+    return (
+        f'<div class="universe-bars" style="overflow-x:auto">'
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
+        f'aria-label="Value distribution of {html.escape(dim["field"])}">{"".join(bars)}</svg></div>'
+    )
+
+
+def _render_content_universe(universe: dict[str, Any]) -> str:
+    dims = universe.get("dimensions") or []
+    if not dims:
+        return ""
+    by_field: dict[str, list[dict[str, Any]]] = {}
+    for dim in dims:
+        by_field.setdefault(dim["field"], []).append(dim)
+    blocks = []
+    for field_name, group in by_field.items():
+        cards = "".join(
+            f'<div class="universe-card{" universe-agg" if dim.get("aggregate") else ""}">'
+            f'<h5>{"🧮 " if dim.get("aggregate") else ""}{html.escape(dim["object"])} <span class="universe-meta">{dim["distinct"]} value'
+            f'{"" if dim["distinct"] == 1 else "s"} · {dim["coverage_pct"]:.0f}% filled</span></h5>'
+            f'{_universe_pie(dim) if dim["kind"] == "pie" else _universe_bars(dim)}</div>'
+            for dim in group
+        )
+        blocks.append(
+            f'<div class="universe-row"><h4>{html.escape(field_name)}</h4><div class="universe-cards">{cards}</div></div>'
+        )
     return f"""
         <div class="content-universe">
-            <h3>🌌 Content Universe ({html.escape(universe.get("field") or "")})</h3>
-            <div class="universe-layout">
-                <svg viewBox="0 0 260 260" width="260" height="260" role="img" aria-label="Content universe donut">
-                    {"".join(paths)}
-                </svg>
-                <div class="universe-legend">{"".join(legend)}</div>
-            </div>
+            <h3>🌌 Content Universe</h3>
+            <p class="universe-intro">Fields with few distinct values and nearly every record filled: they describe what kind of data this is. Each object that has the field gets its own chart.</p>
+            {"".join(blocks)}
         </div>
     """
 
@@ -2487,7 +2540,12 @@ def _render_field_explorer(objects: list[dict[str, Any]], pii_data: dict | None,
             pii_badge = ""
             if pii_key in pii_lookup:
                 pii_type = pii_lookup[pii_key]
-                pii_badge = f'<span class="pii-badge">🔒 {pii_type}</span>'
+                pii_tip = html.escape(
+                    f"Flagged as possible PII ({pii_type}) from the field name and/or its values. "
+                    "Not every flag is real PII. To see the unmasked values and no PII flags, "
+                    "re-run with PII detection disabled: --no-pii-detection (or pii_detection: false in config.yaml)."
+                , quote=True)
+                pii_badge = f'<span class="pii-badge" title="{pii_tip}" aria-label="{pii_tip}" tabindex="0">🔒 {pii_type}</span>'
 
             # Coverage styling: the same 5-band scale as the Coverage heatmap
             cov_class = _coverage_band(coverage_pct)
@@ -5069,6 +5127,12 @@ _HTML_TEMPLATE = '''<!DOCTYPE html>
         .universe-layout {{
             display: flex; gap: var(--space-lg); align-items: center; flex-wrap: wrap;
         }}
+        .universe-row {{ margin: var(--space-md) 0; }}
+        .universe-cards {{ display: flex; flex-wrap: wrap; gap: var(--space-lg); }}
+        .universe-agg {{ padding-left: var(--space-md); border-left: 3px solid var(--accent-primary); }}
+        .universe-card h5 {{ margin: 0 0 var(--space-sm); font-size: 0.95rem; }}
+        .universe-meta {{ font-weight: 400; font-size: 0.8rem; color: var(--text-muted); margin-left: 6px; }}
+        .universe-intro {{ color: var(--text-muted); font-size: 0.875rem; }}
         .universe-legend {{ display: flex; flex-direction: column; gap: 4px; }}
         .legend-row {{ display: flex; align-items: center; gap: var(--space-sm); font-size: 0.875rem; }}
         .legend-swatch {{ width: 14px; height: 14px; border-radius: 3px; display: inline-block; }}

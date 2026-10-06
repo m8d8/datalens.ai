@@ -35,3 +35,11 @@ def is_identifier_name(path: str) -> bool:
     """True for identifier-shaped field names: id, user_id, orderId, sku, uuid, match_key…"""
     leaf = leaf_name(path)
     return leaf.lower() in {"id", "_id", "uuid", "guid"} or bool(name_tokens(leaf) & IDENTIFIER_TOKENS)
+
+
+_PLACEHOLDER_RE = re.compile(r"^(col(umn)?[_ ]?\d+|unnamed.*|field[_ ]?\d+|_\d+)$", re.IGNORECASE)
+
+
+def is_placeholder_name(name: object) -> bool:
+    """True for a blank or tool-generated column name: "", None, col_6, Column1, Unnamed: 3, Field2."""
+    return name is None or not str(name).strip() or bool(_PLACEHOLDER_RE.match(str(name).strip()))

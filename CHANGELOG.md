@@ -5,6 +5,32 @@ All notable changes to this project are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-02
+
+### Added
+- The console now says when results come from a sample (per object: sampled of total) and how to get exact numbers:
+  `--full-scan`, or a larger `--sample-size`.
+- Data Story "Content Universe" now picks up to 3 fields by their values instead of by name: text, not an id, 2–50
+  distinct values, filled in ≥90% of records. A field present in every object ranks first. Each field gets one chart per
+  object, side by side, plus a combined chart summing the counts across objects. Under 10 values is a pie; 10–50 is a
+  colourful vertical bar chart. Nothing is shown when no field qualifies.
+- `pii_detection` setting (`--no-pii-detection`, `DATALENS_PII_DETECTION`): turn PII detection off entirely.
+  Default stays on. The lock badge's hover text now suggests it.
+- Install guide (`docs/INSTALL.md`): every way to install on macOS and Windows (pipx, uv, venv, conda, from source,
+  WSL), extras, upgrade and uninstall, and fixes for common errors.
+
+### Fixed
+- CSV and Excel: empty columns that are out of line with the file's header convention are skipped: a blank header, or
+  a generated name (`col_6`, `Column1`, `Unnamed: 3`) in a file whose other headers are real names. If most headers are
+  generated (`Column1, Column2, Column3`), that is the convention and an empty column is kept. Named columns and
+  columns holding data are always kept.
+- PII false positives: a bare `name` field (channel, team, product) is no longer flagged; 9-digit ids are no longer
+  read as SSNs (SSN, phone and passport values need separators or a matching field name; SSNs must be structurally
+  valid; card numbers must pass Luhn).
+- Docs: the base install covers files and MongoDB; HTTP/REST APIs need the `cloud` extra.
+- Docs: install troubleshooting for an old default `pip` ("No matching distribution found") and
+  "externally-managed-environment".
+
 ## [1.0.0] - 2026-10-02
 
 First stable release, and the first on PyPI. From here on, the CLI commands and flags, exit codes,
@@ -40,5 +66,15 @@ new major version.
 - `connection-list` hid connections whose `${VAR}` placeholders weren't set.
 - PII leaking into schema JSON and history; exact distinct counts; reservoir sampling instead of head-only.
 
-[Unreleased]: https://github.com/m8d8/datalens.ai/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/m8d8/datalens.ai/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/m8d8/datalens.ai/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/m8d8/datalens.ai/releases/tag/v1.0.0
+
+## [0.2.0] - 2026-10-02
+### Added
+- deep schema analysis
+- schema profiling
+- trusted data quality score
+- interactive report
+- cli support
+- optional AI Insights

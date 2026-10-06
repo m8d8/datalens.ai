@@ -114,6 +114,9 @@ class Config:
     """Logical date of the data (--run-date). Orders history and anchors "1 day / 7 days / 1 month" deltas."""
 
     # PII
+    pii_detection: bool = True
+    """Detect PII (field names and values). Off = no PII findings, badges or masking; see docs/SETUP.md."""
+
     mask_pii: bool = True
     """Whether to mask detected PII in reports."""
 
@@ -166,6 +169,12 @@ class Config:
             )
         if os.environ.get("DATALENS_OUT_DIR"):
             self.out_dir = os.environ.get("DATALENS_OUT_DIR")
+        if os.environ.get("DATALENS_PII_DETECTION"):
+            self.pii_detection = os.environ.get("DATALENS_PII_DETECTION", "").lower() in (
+                "true",
+                "1",
+                "yes",
+            )
         if os.environ.get("DATALENS_MASK_PII"):
             self.mask_pii = os.environ.get("DATALENS_MASK_PII", "").lower() in (
                 "true",

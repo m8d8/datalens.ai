@@ -19,7 +19,7 @@ def extract_json_from_text(text: str) -> dict[str, Any] | None:
 
     # Direct parse
     try:
-        data = json.loads(text)
+        data = json.loads(text, strict=False)
         return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
         pass
@@ -28,7 +28,7 @@ def extract_json_from_text(text: str) -> dict[str, Any] | None:
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
     if fence:
         try:
-            data = json.loads(fence.group(1).strip())
+            data = json.loads(fence.group(1).strip(), strict=False)
             return data if isinstance(data, dict) else None
         except json.JSONDecodeError:
             pass
@@ -38,7 +38,7 @@ def extract_json_from_text(text: str) -> dict[str, Any] | None:
     end = text.rfind("}")
     if start >= 0 and end > start:
         try:
-            data = json.loads(text[start : end + 1])
+            data = json.loads(text[start : end + 1], strict=False)
             return data if isinstance(data, dict) else None
         except json.JSONDecodeError:
             pass

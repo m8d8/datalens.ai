@@ -65,6 +65,47 @@ _PATTERNS = {
     PIIType.PASSPORT: re.compile(r"^[A-Z]{1,2}\d{6,9}$"),
 }
 
+_SSN_PARTS = re.compile(r"^(\d{3})[-\s]?(\d{2})[-\s]?(\d{4})$")
+_SEPARATORS = re.compile(r"[-.\s()+]")
+
+
+def _luhn_ok(value: str) -> bool:
+    digits = [int(c) for c in value if c.isdigit()]
+    if len(digits) != 16:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+    return total % 10 == 0
+
+
+def _value_is_pii(pii_type: PIIType, value: str, name_hint: bool) -> bool:
+    """
+    Whether one value looks like PII of this type.
+
+    Bare digit runs (a 9-digit id, a 10-digit code) are not PII on their own, so
+    SSN, phone and passport shapes need either separators or a matching field
+    name. SSNs must also be structurally valid; card numbers must pass Luhn.
+    """
+    if not _PATTERNS[pii_type].match(value):
+        return False
+    if pii_type == PIIType.SSN:
+        m = _SSN_PARTS.match(value)
+        area, group, serial = m.groups()
+        if area in ("000", "666") or area.startswith("9") or group == "00" or serial == "0000":
+            return False
+        return name_hint or bool(_SEPARATORS.search(value))
+    if pii_type == PIIType.PHONE:
+        return name_hint or bool(_SEPARATORS.search(value))
+    if pii_type == PIIType.CREDIT_CARD:
+        return _luhn_ok(value)
+    if pii_type == PIIType.PASSPORT:
+        return name_hint
+    return True
+
+
 # Field-name hints, matched against whole *tokens* of the field name (snake_case,
 # camelCase and kebab-case are split, and adjacent tokens are also joined, so
 # "first_name" / "firstName" give "firstname"). Token matching avoids substring
@@ -82,7 +123,9 @@ _NAME_HINTS: dict[PIIType, tuple[set[str], float]] = {
     PIIType.CREDIT_CARD: ({"cardnumber", "cardnum", "creditcard", "ccnum", "ccnumber", "pan"}, 0.8),
     PIIType.IP_ADDRESS: ({"ip", "ipaddr", "ipaddress", "clientip", "remoteip"}, 0.6),
     PIIType.NAME: ({"firstname", "lastname", "fullname", "surname", "givenname", "familyname",
-                    "middlename", "customername", "username", "displayname"}, 0.75),
+                    "middlename", "customername", "username", "displayname", "employeename",
+                    "personname", "membername", "patientname", "clientname", "contactname",
+                    "accountholder", "cardholder"}, 0.75),
     PIIType.ADDRESS: ({"address", "streetaddress", "street", "addressline", "zip", "zipcode",
                        "postal", "postalcode", "postcode"}, 0.6),
     PIIType.DATE_OF_BIRTH: ({"dob", "birthdate", "dateofbirth", "birthday"}, 0.8),
@@ -91,7 +134,9 @@ _NAME_HINTS: dict[PIIType, tuple[set[str], float]] = {
 }
 
 # Generic words that *may* hold a person's name, reported at low confidence.
-_WEAK_NAME_HINTS: dict[str, float] = {"name": 0.4, "author": 0.45, "owner": 0.4, "contact": 0.4}
+# A bare "name" is deliberately absent: it labels channels, teams, products and
+# venues far more often than people. Use ``pii_force`` for a column that is one.
+_WEAK_NAME_HINTS: dict[str, float] = {"author": 0.45, "owner": 0.4, "contact": 0.4}
 
 # Share of observed values that must match a value pattern before it counts.
 MIN_VALUE_MATCH_RATIO = 0.3
@@ -128,8 +173,9 @@ def detect_pii_in_field(
     # Value patterns (string-like fields only)
     values = [v for v in examples if isinstance(v, str)]
     if field_type in ("string", "email", "phone") and values:
-        for pii_type, pattern in _PATTERNS.items():
-            matches = sum(1 for v in values if pattern.match(v))
+        named = {d.pii_type for d in detections}
+        for pii_type in _PATTERNS:
+            matches = sum(1 for v in values if _value_is_pii(pii_type, v, pii_type in named))
             ratio = matches / len(values)
             if not matches or ratio < MIN_VALUE_MATCH_RATIO:
                 continue

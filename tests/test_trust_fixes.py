@@ -110,8 +110,31 @@ def test_pii_token_matching_avoids_substring_false_positives():
     assert detect_pii_in_field("city", "string", ["Pune"]) == []
     (first,) = detect_pii_in_field("firstName", "string", [])
     assert first.pii_type == PIIType.NAME and first.confidence >= 0.75
-    (generic,) = detect_pii_in_field("name", "string", [])
-    assert generic.confidence < 0.8  # possible, not high risk
+    # A bare "name" (channel name, team name…) is not PII; a person's name is.
+    assert detect_pii_in_field("name", "string", ["CNN Headlines"]) == []
+    assert detect_pii_in_field("Channel Name", "string", ["CNN Headlines"]) == []
+    (user,) = detect_pii_in_field("user_name", "string", [])
+    assert user.pii_type == PIIType.NAME
+    (owner,) = detect_pii_in_field("owner", "string", [])
+    assert owner.confidence < 0.8  # possible, not high risk
+
+
+def test_pii_bare_digit_ids_are_not_ssn_phone_or_card():
+    ids = ["427517053", "429861982", "427517050"]
+    assert detect_pii_in_field("Packaged Service Id", "string", ids) == []
+    assert detect_pii_in_field("code", "string", ["4155551234", "4155551235"]) == []
+    assert detect_pii_in_field("x", "string", ["1234567812345678"]) == []  # fails Luhn
+    assert detect_pii_in_field("x", "string", ["900-12-3456"]) == []  # invalid SSN area
+    # Real shapes still count
+    assert [d.pii_type for d in detect_pii_in_field("x", "string", ["427-51-7053", "123-45-6789"])] == [PIIType.SSN]
+    assert [d.pii_type for d in detect_pii_in_field("ssn", "string", ["427517053"])] == [PIIType.SSN]
+    assert [d.pii_type for d in detect_pii_in_field("x", "string", ["4111111111111111"])] == [PIIType.CREDIT_CARD]
+
+
+def test_pii_detection_can_be_disabled(tmp_path):
+    result = _run(_dataset(tmp_path), sample_size=0, pii_detection=False)
+    assert not result.pii_summary
+    assert "player12@example.com" in json.dumps(result.schema_json)
 
 
 def test_pii_value_detection_uses_values_under_neutral_name():
